@@ -1,0 +1,52 @@
+diff --git a/board/spreadtrum/ums512_1h10/extlinux_diag.c b/board/spreadtrum/ums512_1h10/extlinux_diag.c
+index 5eab53c..d417413 100644
+--- a/board/spreadtrum/ums512_1h10/extlinux_diag.c
++++ b/board/spreadtrum/ums512_1h10/extlinux_diag.c
+@@ -315,7 +315,14 @@ static int do_extlinux_scan(cmd_tbl_t *cmdtp, int flag, int argc,
+ 		"/extlinux/extlinux.conf",
+ 		"/boot/extlinux/extlinux.conf",
+ 	};
+-	int sd_present, fi;
++	static const struct {
++		const char *name;
++		int part;
++	} parts[] = {
++		{ "1:1", 1 },
++		{ "1:2", 2 },
++	};
++	int sd_present, fi, pi;
+ 
+ 	printf("[uboot] extlinux diagnostic scan\n");
+ 
+@@ -346,9 +353,9 @@ static int do_extlinux_scan(cmd_tbl_t *cmdtp, int flag, int argc,
+ 		charge_screen();
+ 	}
+ 
+-	if (sd_present) {
++	for (pi = 0; sd_present && pi < ARRAY_SIZE(parts); pi++) {
+ 		for (fi = 0; fi < ARRAY_SIZE(paths); fi++) {
+-			if (!file_exists("mmc", "1:2", paths[fi], FS_TYPE_ANY))
++			if (!file_exists("mmc", parts[pi].name, paths[fi], FS_TYPE_ANY))
+ 				continue;
+ 
+ 			printf("[uboot] found %s, booting audio DSP\n",
+@@ -362,15 +369,17 @@ static int do_extlinux_scan(cmd_tbl_t *cmdtp, int flag, int argc,
+ 			lcd_banner("Booting...");
+ 			memset_dsp_share_memory();
+ 
+-			if (!try_sysboot(1, 2, paths[fi]))
++			if (!try_sysboot(1, parts[pi].part, paths[fi]))
+ 				return 0;
+ 
+ 			/* Config was there, but boot failed. Nothing to fall back to. */
+ 			printf("[uboot] sysboot failed after DSP boot\n");
+-			break;
++			goto halt;
+ 		}
+ 	}
+ 
++halt:
++
+ 	/*
+ 	 * This U-Boot is hosted on the SD card and boots mainline directly, so
+ 	 * there is no stock to hand back to. Stop here so a failed or missing

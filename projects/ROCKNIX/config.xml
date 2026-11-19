@@ -160,4 +160,7 @@
     <file>sdm845-ayn-odin-m0</file>
     <file>sdm845-ayn-odin-m2</file>
   </SDM845>
+  <UMS512 dtb_prefix="sprd">
+    <file>ums512-rg-rotate</file>
+  </UMS512>
 </rocknix>

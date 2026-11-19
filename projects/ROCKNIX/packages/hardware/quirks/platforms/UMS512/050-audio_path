@@ -1,0 +1,30 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026-present RG EDC
+
+# Speaker path: sc2730 codec HP output -> AW87391 amp, routed by the AGDSP VBC.
+# Without the VBC profile selector the DSP stays silent.
+# Values from https://github.com/beebono/rg-rotate-linux docs/stock_mixer_during.txt
+CARD=$(aplay -l 2>/dev/null | awk -F"[ :]" "/sprdphone/ {print \$2; exit}")
+CARD=${CARD:-0}
+
+mixer() {
+  amixer -q -c ${CARD} cset name="$1" "$2" >/dev/null 2>&1
+}
+
+mixer "DSP VBC Profile Select" 961216512
+mixer "agdsp_access_en" on
+mixer "HPL Mixer DACLHPL Switch" on
+mixer "HPR Mixer DACRHPR Switch" on
+mixer "HPL EAR Sel" HPL
+mixer "HPR Pin Switch" on
+mixer "HP mix mode" 0
+mixer "DAC LRCLK Select" invert
+mixer "Speaker Function" on
+mixer "Speaker1 Function" on
+mixer "aw87xxx_profile_switch_0" Music
+mixer "S_NORMAL_AP01_P_CODEC SWITCH" on
+
+cat <<EOF >/storage/.config/profile.d/050-audio_path
+ALSA_PRIMARY_CARD=${CARD}
+EOF

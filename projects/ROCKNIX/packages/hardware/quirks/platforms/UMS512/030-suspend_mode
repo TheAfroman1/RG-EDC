@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026-present RG EDC
+
+. /etc/profile.d/001-functions
+
+MYSLEEPMODE=$(get_setting system.suspendmode)
+if [ -z "${MYSLEEPMODE}" ]
+then
+  /usr/bin/suspendmode mem
+fi
+
+# The Hall sensor reports the screen swivel as SW_LID. Closing the swivel must not suspend.
+mkdir -p ~/.config/logind.conf.d
+cat <<EOF >~/.config/logind.conf.d/login.conf
+[Login]
+HandlePowerKey=suspend
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+EOF

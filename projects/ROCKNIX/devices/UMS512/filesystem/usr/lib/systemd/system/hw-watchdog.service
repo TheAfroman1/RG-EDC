@@ -1,0 +1,15 @@
+[Unit]
+Description=Feed the AP and sc2730 hardware watchdogs
+DefaultDependencies=no
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'test -c /dev/watchdog0 && test -c /dev/watchdog1'
+ExecStart=/bin/sh -c 'exec 8>/dev/watchdog0 9>/dev/watchdog1; while :; do printf x >&8; printf x >&9; sleep 2; done'
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=sysinit.target

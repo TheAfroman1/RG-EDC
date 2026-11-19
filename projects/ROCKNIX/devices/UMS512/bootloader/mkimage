@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026-present RG EDC
+
+# The patched ums512 SPL on eMMC loads u-boot from a GPT partition named "uboot" on the SD card.
+UBOOT_PART_START=2048
+UBOOT_PART_END=10239
+
+echo "image: adding uboot partition..."
+parted -s "${DISK}" -a min unit s mkpart uboot ${UBOOT_PART_START} ${UBOOT_PART_END} >"${SAVE_ERROR}" 2>&1 || show_error
+
+echo "image: writing u-boot-ums512.img to $(basename "${DISK}")..."
+dd if="${RELEASE_DIR}/3rdparty/bootloader/u-boot-ums512.img" of="${DISK}" bs=512 seek=${UBOOT_PART_START} conv=fsync,notrunc >"${SAVE_ERROR}" 2>&1 || show_error
+
+echo "image: copying device tree..."
+mcopy "${RELEASE_DIR}/3rdparty/bootloader/ums512-rg-rotate.dtb" ::
+
+echo "image: creating extlinux.conf..."
+mkdir -p "${IMG_TMP}/extlinux"
+cat << EOF2 > "${IMG_TMP}/extlinux/extlinux.conf"
+DEFAULT ${DISTRO}
+TIMEOUT 0
+
+LABEL ${DISTRO}
+  KERNEL /${KERNEL_NAME}
+  FDT /ums512-rg-rotate.dtb
+  APPEND boot=LABEL=${DISTRO_BOOTLABEL} disk=LABEL=${DISTRO_DISKLABEL} ${EXTRA_CMDLINE}
+EOF2
+mcopy -s -o "${IMG_TMP}/extlinux" ::
