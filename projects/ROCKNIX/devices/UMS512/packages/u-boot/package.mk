@@ -17,7 +17,7 @@ make_target() {
   setup_pkg_config_host
 
   local uboot_make=(make ARCH=arm DEVICE_TREE=ums512_rg_rotate CROSS_COMPILE="${TARGET_KERNEL_PREFIX}"
-    HOSTCC="${HOST_CC}"
+    HOSTCC="${HOST_CC} -I${TOOLCHAIN}/include -L${TOOLCHAIN}/lib -Wl,-rpath,${TOOLCHAIN}/lib"
     KCFLAGS="-std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types -Wno-error=int-conversion")
 
   DEBUG=${PKG_DEBUG} LDFLAGS="" "${uboot_make[@]}" mrproper
