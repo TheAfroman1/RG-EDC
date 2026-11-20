@@ -13,6 +13,10 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
 export QT_QPA_PLATFORM=wayland
 export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
 export QT_MEDIA_BACKEND=ffmpeg
+# Music dropped out every couple of seconds with Qt's default (small) PulseAudio
+# buffer against our pinned 1280-frame PipeWire quantum. Ask for more. The
+# shell clears this again for the games and apps it starts.
+export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-120}"
 # Games and EmulationStation started from the shell expect what ES sets.
 export SDL_AUDIODRIVER=pulseaudio
 

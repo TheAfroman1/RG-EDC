@@ -167,6 +167,7 @@ bool System::launch(const QString &program, const QStringList &args, const QVari
   if (m_proc) return false;
   m_proc = new QProcess(this);
   QProcessEnvironment pe = QProcessEnvironment::systemEnvironment();
+  pe.remove("PULSE_LATENCY_MSEC");  // only meant for the shell's own music
   for (auto it = env.begin(); it != env.end(); ++it)
     pe.insert(it.key(), it.value().toString());
   m_proc->setProcessEnvironment(pe);
