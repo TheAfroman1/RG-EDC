@@ -24,6 +24,13 @@ mixer "Speaker Function" on
 mixer "Speaker1 Function" on
 mixer "aw87xxx_profile_switch_0" Music
 mixer "S_NORMAL_AP01_P_CODEC SWITCH" on
+mixer "VBC_DAC0_DP_EN" enable
+mixer "VBC DAC0 DG Set" 25,25
+mixer "DAC Gain DAC Playback Volume" 3
+mixer "HPL Gain HPL Playback Volume" 4
+mixer "HPR Gain HPR Playback Volume" 4
+mixer "Speaker Mute" off
+mixer "Speaker2 Mute" off
 
 cat <<EOF >/storage/.config/profile.d/050-audio_path
 ALSA_PRIMARY_CARD=${CARD}
