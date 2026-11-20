@@ -1,0 +1,105 @@
+From: RG EDC
+Subject: [PATCH] gfx/host: create a GLES context first, then fall back to GL
+
+Upstream slot (GPL-3.0-or-later, https://github.com/slot-cfw/slot) runs its
+"host" (winit/glutin) backend with a desktop OpenGL 3.3 core context. On
+embedded Mesa drivers such as panfrost (Mali-G52 on the Anbernic RG Rotate)
+glutin's default EGL config is only GLES-renderable and there is no desktop
+GL 3.3 core, so context creation fails with EGL_BAD_MATCH (0x3009,
+"arguments are inconsistent").
+
+Try GLES 3.0, GLES 2.0, GL 3.3 core and any GL, in that order. slot's
+shaders already have a GLES path (gl::es() picks the GLSL ES preamble from
+GL_VERSION), so nothing else changes. SLOT_GL_API=gl|gles restricts the
+family, and SLOT_GL_DEBUG=1 prints the chosen config and context API.
+
+This patch is distributed under the same GPL-3.0-or-later licence.
+---
+--- a/crates/slot-gfx/src/host.rs
++++ b/crates/slot-gfx/src/host.rs
+@@ -72,11 +72,7 @@
+ 
+         let display = config.display();
+         let handle = window.window_handle().map_err(err)?.as_raw();
+-        let context_attrs = ContextAttributesBuilder::new()
+-            .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3))))
+-            .with_profile(GlProfile::Core)
+-            .build(Some(handle));
+-        let context = unsafe { display.create_context(&config, &context_attrs) }.map_err(err)?;
++        let context = create_context(&display, &config, handle)?;
+ 
+         let surface_attrs = window
+             .build_surface_attributes(Default::default())
+@@ -158,6 +154,72 @@
+     Ok((window, surface))
+ }
+ 
++fn gl_debug() -> bool {
++    std::env::var_os("SLOT_GL_DEBUG").is_some_and(|v| v != "0")
++}
++
++/// RG EDC: the context APIs to try, in order. GLES first: embedded Mesa
++/// drivers such as panfrost (Mali) offer GLES 3.x but no desktop GL 3.3 core,
++/// and glutin's default EGL config is GLES2-renderable, so asking it for a
++/// desktop core context fails with EGL_BAD_MATCH. slot's shaders already
++/// carry a GLES path (see shaders.rs). SLOT_GL_API=gl|gles forces one family.
++fn context_apis() -> Vec<(ContextApi, Option<GlProfile>, &'static str)> {
++    let gles = [
++        (ContextApi::Gles(Some(Version::new(3, 0))), None, "GLES 3.0"),
++        (ContextApi::Gles(Some(Version::new(2, 0))), None, "GLES 2.0"),
++    ];
++    let gl = [
++        (ContextApi::OpenGl(Some(Version::new(3, 3))), Some(GlProfile::Core), "GL 3.3 core"),
++        (ContextApi::OpenGl(None), None, "GL (any)"),
++    ];
++    match std::env::var("SLOT_GL_API").ok().as_deref() {
++        Some("gl") => gl.to_vec(),
++        Some("gles") => gles.to_vec(),
++        _ => gles.into_iter().chain(gl).collect(),
++    }
++}
++
++fn create_context(
++    display: &glutin::display::Display,
++    config: &Config,
++    handle: raw_window_handle::RawWindowHandle,
++) -> Result<glutin::context::NotCurrentContext, GfxError> {
++    if gl_debug() {
++        eprintln!(
++            "slot: gl config: api {:?}, color {:?}, alpha {}, depth {}, stencil {}, samples {}, srgb {}",
++            config.api(),
++            config.color_buffer_type(),
++            config.alpha_size(),
++            config.depth_size(),
++            config.stencil_size(),
++            config.num_samples(),
++            config.srgb_capable(),
++        );
++    }
++    let mut last = None;
++    for (api, profile, name) in context_apis() {
++        let mut attrs = ContextAttributesBuilder::new().with_context_api(api);
++        if let Some(profile) = profile {
++            attrs = attrs.with_profile(profile);
++        }
++        match unsafe { display.create_context(config, &attrs.build(Some(handle))) } {
++            Ok(context) => {
++                if gl_debug() {
++                    eprintln!("slot: gl context: {name}");
++                }
++                return Ok(context);
++            }
++            Err(e) => {
++                if gl_debug() {
++                    eprintln!("slot: gl context: {name} failed: {e}");
++                }
++                last = Some(e);
++            }
++        }
++    }
++    Err(err(last.map_or_else(|| "no context API to try".to_string(), |e| e.to_string())))
++}
++
+ fn pick_config(configs: Box<dyn Iterator<Item = Config> + '_>) -> Config {
+     let mut best: Option<Config> = None;
+     for c in configs {

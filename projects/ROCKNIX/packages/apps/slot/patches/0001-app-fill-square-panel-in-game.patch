@@ -1,0 +1,61 @@
+From: RG EDC
+Subject: [PATCH] app: fill a square 720x720 panel in game
+
+Upstream slot (GPL-3.0-or-later, https://github.com/slot-cfw/slot) already
+lays the shelf, menus and footer out on taller canvases, but in game a panel
+with no built-in frame got a flat lime placeholder around a 720x480 band.
+
+On such panels (table_panel(), e.g. the Anbernic RG Rotate's 720x720):
+- the default "SP frame" scale is drawn as Integer, which upstream's own
+  720x720 placement table maps to GB/GBC at 4x (640x576) and GBA at 3x
+  (720x480);
+- the shelf background is drawn behind the game instead of the placeholder.
+Standard 720x480 and 640x480 panels are unchanged. A scale picked in the
+menu is still honoured.
+
+This patch is distributed under the same GPL-3.0-or-later licence.
+---
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -4277,7 +4277,13 @@
+     }
+ 
+     fn drawn_scale(&self, platform: Platform) -> Scale {
+-        let stored = self.scale_of(platform);
++        // RG EDC: on a panel with no built-in frame (720x720), the SP frame
++        // has nothing to frame, so draw the default as Integer instead: GB/GBC
++        // at 4x (640x576) and GBA at 3x (720x480) over the shelf background.
++        let stored = match (self.table_panel(), self.scale_of(platform)) {
++            (true, Scale::SpFrame) => Scale::Integer,
++            (_, scale) => scale,
++        };
+         let shown = self.shown_as(platform, VideoMode::Actual, stored, Stretch::Classic);
+         Self::scale_candidates(platform)
+             .iter()
+@@ -8627,7 +8633,14 @@
+                 self.chrome(cart, 0.0, out);
+             }
+             Phase::Playing { .. } if below && !self.ds_seated() => self.draw_background(out),
+-            Phase::Playing { .. } => self.push_game(out),
++            Phase::Playing { .. } => {
++                // RG EDC: fill the rest of a square panel with the shelf
++                // background instead of a flat placeholder colour.
++                if self.table_panel() {
++                    self.draw_background(out);
++                }
++                self.push_game(out)
++            }
+             Phase::Polaroids { .. } if self.guide.is_some() => {
+                 if let Some((g, _)) = &self.guide {
+                     g.draw(
+@@ -8774,7 +8787,9 @@
+     }
+ 
+     pub fn placeholder_bezel(&self) -> Option<[f32; 4]> {
+-        self.table_panel().then_some(PLACEHOLDER_BEZEL)
++        // RG EDC: the background is drawn behind the game on these panels.
++        let _ = PLACEHOLDER_BEZEL;
++        None
+     }
+ 
+     fn table_panel(&self) -> bool {
