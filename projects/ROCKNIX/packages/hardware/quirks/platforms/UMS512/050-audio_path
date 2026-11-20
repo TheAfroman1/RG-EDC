@@ -3,7 +3,8 @@
 # Copyright (C) 2026-present RG EDC
 
 # Speaker path: sc2730 codec HP output -> AW87391 amp, routed by the AGDSP VBC.
-# Without the VBC profile selector the DSP stays silent.
+# "DSP VBC Profile Select" is not set: the driver ignores it unless a dsp_vbc
+# profile firmware is loaded, and none exists for this device.
 # Values from https://github.com/beebono/rg-rotate-linux docs/stock_mixer_during.txt
 CARD=$(aplay -l 2>/dev/null | awk -F"[ :]" "/sprdphone/ {print \$2; exit}")
 CARD=${CARD:-0}
@@ -12,7 +13,6 @@ mixer() {
   amixer -q -c ${CARD} cset name="$1" "$2" >/dev/null 2>&1
 }
 
-mixer "DSP VBC Profile Select" 961216512
 mixer "agdsp_access_en" on
 mixer "HPL Mixer DACLHPL Switch" on
 mixer "HPR Mixer DACRHPR Switch" on
