@@ -25,7 +25,7 @@ mixer "Speaker1 Function" on
 mixer "aw87xxx_profile_switch_0" Music
 mixer "S_NORMAL_AP01_P_CODEC SWITCH" on
 mixer "VBC_DAC0_DP_EN" enable
-mixer "VBC DAC0 DG Set" 25,25
+mixer "VBC DAC0 DG Set" 23,23
 mixer "DAC Gain DAC Playback Volume" 3
 mixer "HPL Gain HPL Playback Volume" 4
 mixer "HPR Gain HPR Playback Volume" 4
