@@ -35,3 +35,10 @@ mixer "Speaker2 Mute" off
 cat <<EOF >/storage/.config/profile.d/050-audio_path
 ALSA_PRIMARY_CARD=${CARD}
 EOF
+
+# PipeWire is started from default.target, before rocknix-autostart runs this
+# quirk, so its speaker sink (60-rg-rotate-speaker.conf, nofail) could not
+# open the PCM while the DSP path above was still off. Restart it now that the
+# path is set; the common 050-audio step that follows needs it running.
+systemctl reset-failed pipewire.service wireplumber.service pipewire-pulse.service 2>/dev/null
+systemctl restart pipewire.service wireplumber.service pipewire-pulse.service
