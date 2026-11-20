@@ -18,7 +18,7 @@ make_target() {
 
   local uboot_make=(make ARCH=arm DEVICE_TREE=ums512_rg_rotate CROSS_COMPILE="${TARGET_KERNEL_PREFIX}"
     HOSTCC="${HOST_CC} -I${TOOLCHAIN}/include -L${TOOLCHAIN}/lib -Wl,-rpath,${TOOLCHAIN}/lib"
-    KCFLAGS="-std=gnu11 -Wno-error")
+    KCFLAGS="-std=gnu11 -fpermissive -Wno-error -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types")
 
   DEBUG=${PKG_DEBUG} LDFLAGS="" "${uboot_make[@]}" mrproper
   DEBUG=${PKG_DEBUG} LDFLAGS="" "${uboot_make[@]}" ums512_rg_rotate_defconfig
