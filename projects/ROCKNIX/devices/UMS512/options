@@ -63,7 +63,7 @@
     FIRMWARE="rg-rotate-firmware"
 
   # Additional packages to install
-    ADDITIONAL_PACKAGES="inputplumber slot rgedc-session rgedc-shell"
+    ADDITIONAL_PACKAGES="inputplumber slot rgedc-session rgedc-shell rgedc-phone"
 
   # Debug tty path
     DEBUG_TTY="/dev/ttyGS0"

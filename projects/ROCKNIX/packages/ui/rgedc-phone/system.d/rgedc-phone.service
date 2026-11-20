@@ -1,0 +1,14 @@
+[Unit]
+Description=RG EDC phone link (notifications over Bluetooth LE)
+After=bluetooth.service
+PartOf=bluetooth.service
+
+[Service]
+Type=simple
+# A copy in /storage/.config/rgedc wins, so fixes can be tried without a rebuild.
+ExecStart=/bin/sh -c 'f=/storage/.config/rgedc/rgedc-phone; [ -f "$f" ] || f=/usr/bin/rgedc-phone; exec /usr/bin/python "$f"'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=bluetooth.service
