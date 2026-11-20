@@ -29,6 +29,21 @@ Item {
       font.family: Theme.mono; font.pixelSize: 15
       color: Theme.creamDim
     }
+    Row {
+      visible: Phone.connected || Phone.unread > 0
+      spacing: 6
+      anchors.verticalCenter: parent.verticalCenter
+      Rectangle {
+        visible: Phone.unread > 0
+        width: 8; height: 8; radius: 4; color: Theme.copper
+        anchors.verticalCenter: parent.verticalCenter
+      }
+      Text {
+        text: Phone.connected ? (Phone.kind === "ios" ? "IPHONE" : "PHONE") : String(Phone.unread)
+        font.family: Theme.mono; font.pixelSize: 15
+        color: Phone.connected ? Theme.textDim : Theme.textMute
+      }
+    }
     Text {
       text: System.wifi ? "WI-FI" : "WI-FI OFF"
       opacity: System.wifi ? 1 : 0.5

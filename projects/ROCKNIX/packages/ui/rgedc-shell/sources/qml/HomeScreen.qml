@@ -24,6 +24,13 @@ Item {
       sub: lastGame ? (Library.system(lastGame.system).fullname || lastGame.system) + "\nLast played"
                     : "Cartridges and discs from the\nROM folders, oldest systems first",
       action: lastGame ? "Open shelf" : "Open shelves" },
+    { key: "notifications", label: "Phone",
+      kicker: Phone.unread ? Phone.unread + " NEW" : (Phone.connected ? "CONNECTED" : "PHONE"),
+      title: Phone.count ? (Phone.notifications[0].title || Phone.notifications[0].app)
+                         : (Phone.connected ? "All caught up" : (Phone.known.length ? "Not connected" : "No phone yet")),
+      sub: Phone.count ? (Phone.notifications[0].app || "") + "\n" + Phone.count + " notification" + (Phone.count === 1 ? "" : "s")
+                       : (Phone.connected ? Phone.name : (Phone.available ? "Pair an iPhone or Android phone\nin Settings › Phone" : "Turn Bluetooth on to\nlink a phone")),
+      action: Phone.count ? "Open notifications" : "Open" },
     { key: "watch", label: "Watch",
       kicker: "WATCH FACE",
       title: ({ analog: "Analog, aluminum", digital: "Digital, walnut", nixie: "Nixie tubes" })[System.settingsRevision >= 0 ? System.setting("watchFace", "analog") : "analog"],

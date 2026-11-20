@@ -15,6 +15,7 @@
 
 #include "gamepad.h"
 #include "library.h"
+#include "phone.h"
 #include "spectrum.h"
 #include "system.h"
 
@@ -50,10 +51,12 @@ int main(int argc, char *argv[]) {
   Library lib;
   Gamepad pad;
   Spectrum spec;
+  Phone phone;
   qmlRegisterSingletonInstance("RgEdc", 1, 0, "System", &sys);
   qmlRegisterSingletonInstance("RgEdc", 1, 0, "Library", &lib);
   qmlRegisterSingletonInstance("RgEdc", 1, 0, "Gamepad", &pad);
   qmlRegisterSingletonInstance("RgEdc", 1, 0, "Spectrum", &spec);
+  qmlRegisterSingletonInstance("RgEdc", 1, 0, "Phone", &phone);
 
   QQmlApplicationEngine engine;
   const QString qml = findDir("RGEDC_QML", "qml");

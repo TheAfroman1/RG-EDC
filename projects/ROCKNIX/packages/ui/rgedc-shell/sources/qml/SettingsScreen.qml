@@ -10,6 +10,9 @@ Item {
   property int sel: 0
   property string confirm: ""
   property bool showAbout: false      // row key waiting for a second A press
+  property string pairKind: ""        // pairing guide showing: "ios" or "android"
+  property bool pairDone: false
+  property string pairFrom: ""        // phone already connected when the guide opened
 
   function opt(key, def) { return System.settingsRevision >= 0 ? System.setting(key, def) : def }
   function on(key, def) { return System.settingsRevision >= 0 && System.flag(key, def) }
@@ -19,6 +22,12 @@ Item {
     { key: "nixieSeconds", label: "Nixie shows seconds", kind: "toggle", value: on("nixieSeconds", true) },
     { key: "disc", label: "Music spins a", kind: "choice", values: ["vinyl", "cd"], names: ["Vinyl record", "CD"], value: opt("disc", "vinyl") },
     { key: "lidVisualizer", label: "Flip shut while playing", kind: "choice", values: ["true", "false"], names: ["Visualizer", "Sleep"], value: String(on("lidVisualizer", true)) },
+    { key: "phone", label: "Phone", kind: "info",
+      value: !Phone.available ? "Bluetooth off" : Phone.connected ? Phone.name : Phone.known.length ? "Not connected" : "None paired" },
+    { key: "pairIos", label: "Pair an iPhone", kind: "action" },
+    { key: "pairAndroid", label: "Pair an Android phone", kind: "action" },
+    { key: "notifBanners", label: "Notification banners", kind: "toggle", value: on("notifBanners", true) },
+    { key: "forgetPhone", label: "Forget paired phones", kind: "action", danger: true },
     { key: "volume", label: "Volume", kind: "level", value: System.volume },
     { key: "brightness", label: "Brightness", kind: "level", value: System.brightness },
     { key: "nintendo", label: "Confirm button", kind: "choice", values: ["true", "false"], names: ["A (right)", "A (bottom)"], value: String(on("nintendo", true)) },
@@ -123,6 +132,76 @@ Item {
     Hints { anchors.bottom: parent.bottom; model: ["B BACK"] }
   }
 
+  // Pairing guide
+  Rectangle {
+    anchors.fill: parent
+    color: "#050506"
+    visible: settings.pairKind !== ""
+    Column {
+      x: 60; y: 110; width: 600; spacing: 22
+      Text {
+        text: settings.pairKind === "ios" ? "PAIR AN IPHONE" : "PAIR AN ANDROID PHONE"
+        font.family: Theme.mono; font.pixelSize: 14; font.letterSpacing: 4; color: Theme.copper
+      }
+      Text {
+        width: parent.width; wrapMode: Text.WordWrap
+        text: settings.pairDone ? "Paired with " + Phone.name
+            : !Phone.available ? "Turn Bluetooth on first"
+            : settings.pairKind === "ios" ? "Look for “RG EDC” on your iPhone" : "Look for “Espruino RG EDC” in Gadgetbridge"
+        font.family: Theme.sans; font.pixelSize: 36; font.weight: Font.Bold; lineHeight: 1.1; color: Theme.text
+      }
+      Repeater {
+        model: settings.pairDone ? ["Its notifications now show up on the watch and under Phone."]
+             : settings.pairKind === "ios"
+             ? ["1   On the iPhone, open Settings › Bluetooth.",
+                "2   Tap RG EDC under Other Devices.",
+                "3   Tap Pair, then allow RG EDC to show notifications.",
+                "RG EDC also takes the time from the iPhone."]
+             : ["1   Install Gadgetbridge from F-Droid.",
+                "2   Tap + and pick Espruino RG EDC (it pairs as a Bangle.js).",
+                "3   Give Gadgetbridge notification access when it asks.",
+                "Calls, music and the time come through Gadgetbridge too."]
+        Text {
+          required property string modelData
+          required property int index
+          width: 600; wrapMode: Text.WordWrap
+          text: modelData
+          font.family: Theme.sans; font.pixelSize: 20; lineHeight: 1.3
+          color: index === 3 || settings.pairDone ? Theme.textMute : Theme.textDim
+        }
+      }
+    }
+    Row {
+      x: 60; y: 600; spacing: 12
+      visible: !settings.pairDone && Phone.available
+      Repeater {
+        model: 3
+        Rectangle {
+          required property int index
+          width: 10; height: 10; radius: 5; color: Theme.copper
+          anchors.verticalCenter: parent.verticalCenter
+          SequentialAnimation on opacity {
+            running: settings.pairKind !== "" && !settings.pairDone; loops: Animation.Infinite
+            PauseAnimation { duration: index * 250 }
+            NumberAnimation { from: 1; to: 0.2; duration: 600 }
+            NumberAnimation { from: 0.2; to: 1; duration: 600 }
+            PauseAnimation { duration: (2 - index) * 250 }
+          }
+        }
+      }
+      Text { text: "Waiting for the phone"; font.family: Theme.mono; font.pixelSize: 14; color: Theme.textMute }
+    }
+    Hints { anchors.bottom: parent.bottom; model: [settings.pairDone ? "B DONE" : "B STOP"] }
+  }
+  Connections {
+    target: Phone
+    function onStateChanged() {
+      if (settings.pairKind !== "" && Phone.connected && Phone.kind === settings.pairKind && Phone.name !== settings.pairFrom)
+        settings.pairDone = true
+    }
+  }
+  Timer { interval: 3500; running: settings.pairDone; onTriggered: { settings.pairKind = ""; settings.pairDone = false } }
+
   function change(r, d) {
     if (r.kind === "choice") {
       var i = r.values.indexOf(String(r.value))
@@ -139,10 +218,18 @@ Item {
 
   function act(r) {
     if (r.key === "about") { showAbout = true; return }
+    if (r.key === "pairIos" || r.key === "pairAndroid") {
+      pairKind = r.key === "pairIos" ? "ios" : "android"
+      pairDone = false
+      pairFrom = Phone.connected ? Phone.name : ""
+      Phone.startPairing(pairKind)
+      return
+    }
     if (r.kind !== "action") { change(r, 1); return }
     if (r.danger && confirm !== r.key) { confirm = r.key; return }
     confirm = ""
     if (r.key === "rescan") Library.rescan()
+    else if (r.key === "forgetPhone") Phone.forget()
     else if (r.key === "es") System.openEmulationStation()
     else if (r.key === "bootEs") { System.setBootToEmulationStation(true); Qt.quit() }
     else if (r.key === "reboot") System.reboot()
@@ -151,6 +238,14 @@ Item {
 
   function handle(b) {
     if (showAbout) { if (b === "b" || b === "a") showAbout = false; return true }
+    if (pairKind !== "") {
+      if (b === "b" || (b === "a" && pairDone)) {
+        if (!pairDone) Phone.stopPairing()
+        pairKind = ""
+        pairDone = false
+      }
+      return true
+    }
     var r = rows[sel]
     if (b !== "a") confirm = ""
     if (b === "up") { sel = Math.max(0, sel - 1); return true }

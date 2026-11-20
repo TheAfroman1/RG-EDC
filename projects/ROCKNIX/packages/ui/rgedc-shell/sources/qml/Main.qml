@@ -14,9 +14,10 @@ Window {
   visible: !(System.busy && System.onDevice)
   onVisibleChanged: if (visible && System.onDevice) showFullScreen()
 
-  readonly property var screens: ["watch", "home", "music", "games", "settings", "visualizer"]
+  readonly property var screens: ["watch", "home", "music", "games", "notifications", "settings", "visualizer"]
   readonly property var files: ({ watch: "WatchScreen.qml", home: "HomeScreen.qml", music: "MusicScreen.qml",
-                                  games: "GamesScreen.qml", settings: "SettingsScreen.qml", visualizer: "VisualizerScreen.qml" })
+                                  games: "GamesScreen.qml", notifications: "NotificationsScreen.qml",
+                                  settings: "SettingsScreen.qml", visualizer: "VisualizerScreen.qml" })
 
   Binding { target: Gamepad; property: "paused"; value: System.busy }
   Binding { target: Gamepad; property: "nintendoLayout"; value: System.settingsRevision >= 0 && System.flag("nintendo", true) }
@@ -52,6 +53,10 @@ Window {
         z: current ? 1 : 0
       }
     }
+
+    // Phone: new-notification banner and the incoming call card.
+    Banner { z: 8 }
+    CallCard { id: callCard; z: 9 }
 
     // Start-up splash: the RG EDC badge, fading into the watch.
     Rectangle {
@@ -114,6 +119,7 @@ Window {
     target: Gamepad
     function onPressed(name) {
       idle.restart()
+      if (Phone.ringing) { callCard.handle(name); return }
       if (name === "guide") { Nav.go("home"); return }
       const s = win.currentScreen()
       if (s && s.handle) s.handle(name)
@@ -125,7 +131,7 @@ Window {
     id: idle
     interval: Math.max(5, Number(System.settingsRevision >= 0 ? System.setting("idleWatch", 60) : 60)) * 1000
     running: Number(System.setting("idleWatch", 60)) > 0 && !System.busy
-    onTriggered: if (Nav.screen === "home" || Nav.screen === "settings") Nav.go("watch")
+    onTriggered: if (["home", "settings", "notifications"].indexOf(Nav.screen) >= 0) Nav.go("watch")
   }
 
   // Flip shut: visualizer while music plays, otherwise the normal sleep.
