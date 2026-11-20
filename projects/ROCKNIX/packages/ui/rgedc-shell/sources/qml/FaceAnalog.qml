@@ -55,20 +55,12 @@ Item {
 
   Walnut { x: 352; y: 96; width: 16; height: 46; radius: 3 }
 
-  Column {
-    y: 196; width: parent.width; spacing: 4
-    Text {
-      anchors.horizontalCenter: parent.horizontalCenter
-      text: "RG EDC"
-      font.family: Theme.sans; font.pixelSize: 22; font.weight: Font.Bold; font.letterSpacing: 6
-      color: "#d9dcdf"
-    }
-    Text {
-      anchors.horizontalCenter: parent.horizontalCenter
-      text: "EVERYDAY CARRY"
-      font.family: Theme.mono; font.pixelSize: 12; font.letterSpacing: 3
-      color: Theme.textMute
-    }
+  // Joe's metal-and-leather nameplate
+  Image {
+    x: 360 - width / 2; y: 168
+    width: 216; height: 72
+    source: "images/plate.png"
+    smooth: true; mipmap: true
   }
 
   // Date window
