@@ -1,0 +1,127 @@
+From: RG EDC
+Subject: [PATCH] host: leave system settings to RG EDC; real battery
+
+Upstream slot (GPL-3.0-or-later, https://github.com/slot-cfw/slot) owns the
+whole device on BaseOS: Wi-Fi, the clock, lid power-off, rumble, the
+backlight and OTA updates. In its host build those rows do nothing, and
+under the RG EDC shell the system owns them, so a user would think they
+work when they don't. For the host build only:
+
+- hide Wi-Fi, Wi-Fi power, Networks, Check for Updates, Date & Time, Lid
+  Power Off, Rumble, Brightness and the brightness shortcuts, in the main
+  and the in-game menus;
+- skip the first-run "Set the clock" screen (the system clock is set by
+  RG EDC);
+- report the real battery from /sys/class/power_supply/battery (capacity,
+  status) instead of a constant 100% charging, falling back to that only
+  when the system has no battery.
+
+This patch is distributed under the same GPL-3.0-or-later licence.
+---
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -1437,7 +1437,9 @@
+         if app.kid_one_shelf() {
+             app.shelf_at = app.kid_shelf_at();
+         }
+-        if app.state.clock_set {
++        // RG EDC: the system clock is managed by RG EDC (NTP, its own clock
++        // settings), so the host build skips slot's first-run clock screen.
++        if app.state.clock_set || cfg!(feature = "host") {
+             app.start();
+         } else {
+             app.phase = clock_screen(system_secs(), &app.state, app.has_saved(), false);
+@@ -2746,6 +2748,9 @@
+         if self.single_cart() {
+             hidden.push(QuickRow::ExitGame);
+         }
++        if cfg!(feature = "host") {
++            hidden.extend(crate::rgedc::SYSTEM_OWNED);
++        }
+         if self.playing_platform().hardware() != Platform::Gba {
+             hidden.extend([QuickRow::GameL, QuickRow::GameR]);
+         }
+@@ -3815,6 +3820,12 @@
+         if !self.left_stick {
+             hidden.push(QuickRow::LeftStick);
+         }
++        // RG EDC: under the RG EDC shell, Wi-Fi, the clock, lid, rumble and
++        // backlight belong to the system, and slot's own updater targets
++        // BaseOS. Their rows would do nothing here, so hide them.
++        if cfg!(feature = "host") {
++            hidden.extend(crate::rgedc::SYSTEM_OWNED);
++        }
+         if !self.server_allowed() {
+             hidden.push(QuickRow::Server);
+         }
+--- a/crates/slot-power/src/sim.rs
++++ b/crates/slot-power/src/sim.rs
+@@ -49,7 +49,15 @@
+ impl Platform for SimPlatform {
+     fn set_backlight(&mut self, _step: u8) {}
+ 
++    // RG EDC: report the real battery when the system has one
++    // (/sys/class/power_supply/battery), instead of a constant 100% charging.
+     fn battery(&self) -> Option<Battery> {
++        if let Some(percent) = sys_battery("capacity").and_then(|v| v.parse::<u8>().ok()) {
++            return Some(Battery {
++                percent: percent.min(100),
++                charge: self.charge(),
++            });
++        }
+         Some(Battery {
+             percent: 100,
+             charge: Charge::Charging,
+@@ -57,7 +65,13 @@
+     }
+ 
+     fn charge(&self) -> Charge {
+-        Charge::Charging
++        match sys_battery("status").as_deref() {
++            Some("Charging") => Charge::Charging,
++            Some("Full") => Charge::Full,
++            Some("Discharging" | "Not charging") => Charge::Discharging,
++            Some(_) => Charge::Unknown,
++            None => Charge::Charging,
++        }
+     }
+ 
+     fn set_led(&mut self, _state: LedState) {}
+@@ -96,6 +110,11 @@
+     }
+ }
+ 
++fn sys_battery(file: &str) -> Option<String> {
++    let path = Path::new("/sys/class/power_supply/battery").join(file);
++    std::fs::read_to_string(path).ok().map(|v| v.trim().to_string())
++}
++
+ fn system_secs() -> i64 {
+     SystemTime::now()
+         .duration_since(UNIX_EPOCH)
+--- a/crates/slot/src/rgedc.rs
++++ b/crates/slot/src/rgedc.rs
+@@ -6,6 +6,23 @@
+ //! - SLOT_BACK_EXITS=1 makes B on the shelf quit back to the shell.
+ use std::path::Path;
+ 
++use slot_ui::QuickRow;
++
++/// Menu rows for things the system owns under RG EDC (see app.rs).
++pub const SYSTEM_OWNED: [QuickRow; 11] = [
++    QuickRow::Wifi,
++    QuickRow::WifiPower,
++    QuickRow::Networks,
++    QuickRow::CheckUpdates,
++    QuickRow::DateTime,
++    QuickRow::LidOff,
++    QuickRow::Rumble,
++    QuickRow::Brightness,
++    QuickRow::PlayBrightness,
++    QuickRow::ScBrightUp,
++    QuickRow::ScBrightDown,
++];
++
+ pub fn shelf() -> Option<String> {
+     let v = std::env::var("SLOT_SHELF").ok()?;
+     let v = v.trim().to_ascii_lowercase();
