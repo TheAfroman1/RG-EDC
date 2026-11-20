@@ -15,6 +15,10 @@ makeinstall_target() {
   cp ${PKG_DIR}/scripts/start_rgedc.sh ${INSTALL}/usr/bin/start_rgedc.sh
   chmod 0755 ${INSTALL}/usr/bin/start_rgedc.sh
 
+  mkdir -p ${INSTALL}/usr/config/modules
+  cp "${PKG_DIR}/modules/Return to RG EDC.sh" ${INSTALL}/usr/config/modules/
+  chmod 0755 "${INSTALL}/usr/config/modules/Return to RG EDC.sh"
+
   mkdir -p ${INSTALL}/usr/lib/systemd/system/essway.service.d
   cp ${PKG_DIR}/system.d/essway.service.d/10-rgedc-session.conf \
     ${INSTALL}/usr/lib/systemd/system/essway.service.d/

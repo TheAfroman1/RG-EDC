@@ -4,7 +4,8 @@
 #
 # What the RG EDC session starts in sway (run by essway.service):
 #   1. /storage/.config/rgedc/boot_es exists -> EmulationStation, as before.
-#   2. /usr/bin/rgedc-shell exists           -> the RG EDC shell.
+#   2. /usr/bin/rgedc-shell exists           -> the RG EDC shell (EmulationStation
+#      if it fails at start-up).
 #   3. otherwise (interim)                   -> slot.; leaving it ("Back to
 #      RG EDC", or B on the shelf) continues into EmulationStation for every
 #      system slot doesn't cover.
@@ -16,7 +17,18 @@ if [ -e /storage/.config/rgedc/boot_es ]; then
 fi
 
 if [ -x /usr/bin/rgedc-shell ]; then
-  exec /usr/bin/rgedc-shell "$@"
+  START=$(date +%s)
+  /usr/bin/rgedc-shell "$@"
+  RC=$?
+  # Settings > Start in EmulationStation sets the flag and quits.
+  [ -e /storage/.config/rgedc/boot_es ] && exec /usr/bin/start_es.sh "$@"
+  # If the shell dies right away, don't loop on a black screen: run ES this
+  # time (essway restarts us, and the shell is tried again, when ES exits).
+  if [ ${RC} -ne 0 ] && [ $(( $(date +%s) - START )) -lt 20 ]; then
+    echo "rgedc-shell exited with ${RC} at start-up, falling back to EmulationStation" >>/var/log/rgedc-shell.log
+    exec /usr/bin/start_es.sh "$@"
+  fi
+  exit ${RC}
 fi
 
 if [ -x /usr/bin/start_slot.sh ]; then
