@@ -54,6 +54,7 @@ case "${DEVICE}" in
     LIBRETRO_CORES+=" dolphin-lr hakux-lr uae4arm-lr"
     ;;
   UMS512)
+    [ "${ENABLE_32BIT}" == "true" ] && EMUS_32BIT="box86 desmume-lr gpsp-lr pcsx_rearmed-lr yabadabadoo-lr"
     PKG_DEPENDS_TARGET+=" common-shaders glsl-shaders"
     PKG_EMUS+=" drastic-sa mednafen melonds-sa"
     LIBRETRO_CORES+=" beetle-psx-lr uae4arm-lr"
