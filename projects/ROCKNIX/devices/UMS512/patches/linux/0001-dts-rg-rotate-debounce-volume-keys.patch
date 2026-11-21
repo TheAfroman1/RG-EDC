@@ -1,0 +1,26 @@
+From: RG EDC
+Subject: [PATCH] arm64: dts: ums512-rg-rotate: debounce volume keys for 20 ms
+
+A 2 ms debounce lets one press of the volume keys bounce into several
+press events, so each tap moved the volume by 3-4 steps.
+---
+diff --git a/arch/arm64/boot/dts/sprd/ums512-rg-rotate.dts b/arch/arm64/boot/dts/sprd/ums512-rg-rotate.dts
+index c4e7a911a..967798315 100644
+--- a/arch/arm64/boot/dts/sprd/ums512-rg-rotate.dts
++++ b/arch/arm64/boot/dts/sprd/ums512-rg-rotate.dts
+@@ -339,13 +339,13 @@ key-volumedown {
+ 			label = "Volume Down Key";
+ 			linux,code = <KEY_VOLUMEDOWN>;
+ 			gpios = <&pmic_eic 4 GPIO_ACTIVE_HIGH>;
+-			debounce-interval = <2>;
++			debounce-interval = <20>;
+ 		};
+ 		key-volumeup {
+ 			label = "Volume Up Key";
+ 			linux,code = <KEY_VOLUMEUP>;
+ 			gpios = <&ap_gpio 30 GPIO_ACTIVE_LOW>;
+-			debounce-interval = <2>;
++			debounce-interval = <20>;
+ 		};
+ 		key-power {
+ 			label = "Power Key";

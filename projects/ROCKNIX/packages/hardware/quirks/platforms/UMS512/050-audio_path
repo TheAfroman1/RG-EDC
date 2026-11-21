@@ -1,0 +1,44 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026-present RG EDC
+
+# Speaker path: sc2730 codec HP output -> AW87391 amp, routed by the AGDSP VBC.
+# "DSP VBC Profile Select" is not set: the driver ignores it unless a dsp_vbc
+# profile firmware is loaded, and none exists for this device.
+# Values from https://github.com/beebono/rg-rotate-linux docs/stock_mixer_during.txt
+CARD=$(aplay -l 2>/dev/null | awk -F"[ :]" "/sprdphone/ {print \$2; exit}")
+CARD=${CARD:-0}
+
+mixer() {
+  amixer -q -c ${CARD} cset name="$1" "$2" >/dev/null 2>&1
+}
+
+mixer "agdsp_access_en" on
+mixer "HPL Mixer DACLHPL Switch" on
+mixer "HPR Mixer DACRHPR Switch" on
+mixer "HPL EAR Sel" HPL
+mixer "HPR Pin Switch" on
+mixer "HP mix mode" 0
+mixer "DAC LRCLK Select" invert
+mixer "Speaker Function" on
+mixer "Speaker1 Function" on
+mixer "aw87xxx_profile_switch_0" Music
+mixer "S_NORMAL_AP01_P_CODEC SWITCH" on
+mixer "VBC_DAC0_DP_EN" enable
+mixer "VBC DAC0 DG Set" 23,23
+mixer "DAC Gain DAC Playback Volume" 3
+mixer "HPL Gain HPL Playback Volume" 4
+mixer "HPR Gain HPR Playback Volume" 4
+mixer "Speaker Mute" off
+mixer "Speaker2 Mute" off
+
+cat <<EOF >/storage/.config/profile.d/050-audio_path
+ALSA_PRIMARY_CARD=${CARD}
+EOF
+
+# PipeWire is started from default.target, before rocknix-autostart runs this
+# quirk, so its speaker sink (60-rg-rotate-speaker.conf, nofail) could not
+# open the PCM while the DSP path above was still off. Restart it now that the
+# path is set; the common 050-audio step that follows needs it running.
+systemctl reset-failed pipewire.service wireplumber.service pipewire-pulse.service 2>/dev/null
+systemctl restart pipewire.service wireplumber.service pipewire-pulse.service

@@ -1,0 +1,27 @@
+From e98e69680681d727a8a5a352c7e9451e61581b8e Mon Sep 17 00:00:00 2001
+From: RG EDC <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 16:40:22 +0000
+Subject: [PATCH] power: supply: sc27xx: name the fuel gauge "battery"
+
+ROCKNIX's scripts and EmulationStation find the battery by looking for
+/sys/class/power_supply/bat*, so the RG Rotate showed no battery level.
+---
+ drivers/power/supply/sc27xx_fuel_gauge.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/power/supply/sc27xx_fuel_gauge.c b/drivers/power/supply/sc27xx_fuel_gauge.c
+index 60610117b..c31fedffb 100644
+--- a/drivers/power/supply/sc27xx_fuel_gauge.c
++++ b/drivers/power/supply/sc27xx_fuel_gauge.c
+@@ -891,7 +891,7 @@ static enum power_supply_property sc27xx_fgu_props[] = {
+ };
+ 
+ static const struct power_supply_desc sc27xx_fgu_desc = {
+-	.name			= "sc27xx-fgu",
++	.name			= "battery",
+ 	.type			= POWER_SUPPLY_TYPE_BATTERY,
+ 	.properties		= sc27xx_fgu_props,
+ 	.num_properties		= ARRAY_SIZE(sc27xx_fgu_props),
+-- 
+2.43.0
+

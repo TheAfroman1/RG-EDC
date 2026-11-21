@@ -57,6 +57,11 @@ case ${DEVICE} in
     PKG_URL="https://www.kernel.org/pub/linux/kernel/v${PKG_VERSION/.*/}.x/${PKG_NAME}-${PKG_VERSION}.tar.xz"
     PKG_PATCH_DIRS+=" 7.0"
     ;;
+  UMS512)
+    PKG_VERSION="464b3e7bf45bb300e190339977abba36c8078e1f"
+    PKG_URL="https://github.com/beebono/linux-mainline-sprd/archive/${PKG_VERSION}.tar.gz"
+    PKG_PATCH_DIRS="${DEVICE}"
+    ;;
   RK3399)
     PKG_VERSION="6.18.54"
     PKG_SHA256="9df30b02dd8102bbd0be52556288ef6889ddbe7f1ddb96fbf847d0becf3eacac"
@@ -94,6 +99,10 @@ if [ "${DEVICE}" = "RK3326" -o "${DEVICE}" = "RK3566" ]; then
   PKG_DEPENDS_UNPACK+=" generic-dsi"
 elif [ "${DEVICE}" = "SM8250" -o "${DEVICE}" = "H700" -o "${DEVICE}" = "SM8650" -o "${DEVICE}" = "SM8750" -o "${DEVICE}" = "SDM845" ]; then
   PKG_DEPENDS_UNPACK+=" kernel-firmware"
+fi
+
+if [ "${DEVICE}" = "UMS512" ]; then
+  PKG_DEPENDS_UNPACK+=" rg-rotate-firmware"
 fi
 
 # SM8650/SM8750 build device-specific firmware blobs into the kernel, so the
@@ -263,6 +272,14 @@ pre_make_target() {
       cp -Lv $(get_build_dir kernel-firmware)/.copied-firmware/panels/anbernic,rg40xx-panel.panel ${PKG_BUILD}/external-firmware/panels
       cp -Lv $(get_build_dir kernel-firmware)/.copied-firmware/panels/anbernic,rg40xx-v2-panel.panel ${PKG_BUILD}/external-firmware/panels
       cp -Lv $(get_build_dir kernel-firmware)/.copied-firmware/panels/anbernic,rgcubexx-panel.panel ${PKG_BUILD}/external-firmware/panels
+
+    FW_LIST="$(find ${PKG_BUILD}/external-firmware -type f | sed 's|.*external-firmware/||' | sort | xargs)"
+
+    ${PKG_BUILD}/scripts/config --set-str CONFIG_EXTRA_FIRMWARE "${FW_LIST}"
+    ${PKG_BUILD}/scripts/config --set-str CONFIG_EXTRA_FIRMWARE_DIR "external-firmware"
+  elif [ "${TARGET_ARCH}" = "aarch64" -a "${DEVICE}" = "UMS512" ]; then
+    mkdir -p ${PKG_BUILD}/external-firmware
+      cp -a $(get_build_dir rg-rotate-firmware)/src/initramfs/overlay/lib/firmware/* ${PKG_BUILD}/external-firmware
 
     FW_LIST="$(find ${PKG_BUILD}/external-firmware -type f | sed 's|.*external-firmware/||' | sort | xargs)"
 

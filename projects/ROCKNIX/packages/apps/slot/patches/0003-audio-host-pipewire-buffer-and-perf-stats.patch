@@ -1,0 +1,236 @@
+From: RG EDC
+Subject: [PATCH] audio/host: buffer a whole PipeWire cycle; SLOT_PERF stats
+
+Upstream slot (GPL-3.0-or-later, https://github.com/slot-cfw/slot) paces its
+emulator thread on the audio ring (push_blocking), and its host backend
+opens cpal with BufferSize::Fixed(512). cpal's ALSA backend uses that as the
+whole ALSA buffer (period 128). Through pipewire-alsa on a graph whose
+quantum is pinned to 1280 frames (the Anbernic RG Rotate's speaker sink),
+512 frames can never fill a cycle: audio is consumed at a fraction of real
+time and the emulator, waiting on it, runs slow with stretched sound.
+
+- Default the buffer to 2560 frames (two 1280-frame cycles).
+  SLOT_AUDIO_BUFFER=<frames> overrides it.
+- SLOT_AUDIO_DEVICE=<name> picks a cpal output device by name.
+- SLOT_PERF=1 prints the chosen audio device and stream config, then once a
+  second: emulated fps, render fps and frame time, audio frames consumed per
+  second, ring fill, underruns and callbacks.
+
+This patch is distributed under the same GPL-3.0-or-later licence.
+---
+--- a/crates/slot/src/audio/host.rs
++++ b/crates/slot/src/audio/host.rs
+@@ -90,7 +90,28 @@
+ 
+ fn open_stream(ring: &Arc<Ring>, sample_rate: u32) -> Result<cpal::Stream, AudioError> {
+     let host = cpal::default_host();
+-    let device = host.default_output_device().ok_or(AudioError::NoDevice)?;
++    let wanted = std::env::var("SLOT_AUDIO_DEVICE").ok();
++    let device = wanted
++        .as_deref()
++        .and_then(|name| {
++            host.output_devices()
++                .ok()?
++                .find(|d| d.name().is_ok_and(|n| n == name))
++        })
++        .or_else(|| host.default_output_device())
++        .ok_or(AudioError::NoDevice)?;
++    if crate::perf::enabled() {
++        let names: Vec<String> = host
++            .output_devices()
++            .map(|it| it.filter_map(|d| d.name().ok()).collect())
++            .unwrap_or_default();
++        eprintln!(
++            "slot: perf: audio device {:?} (asked {:?}); outputs: {}",
++            device.name().unwrap_or_default(),
++            wanted,
++            names.join(", ")
++        );
++    }
+     let fallback = device
+         .default_output_config()
+         .map_err(|e| AudioError::Device(e.to_string()))?;
+@@ -118,7 +139,21 @@
+     })
+ }
+ 
+-const PERIOD_FRAMES: u32 = 512;
++// RG EDC: cpal's ALSA backend uses BufferSize::Fixed(n) as the whole ALSA
++// buffer (period n/4). Upstream's 512 frames is less than one PipeWire graph
++// cycle on devices whose quantum is pinned (1280 frames on the RG Rotate), so
++// pipewire-alsa starved every cycle and, because the emulator is paced by
++// this stream, games ran slow with stretched sound. Default to 2560 frames
++// (two 1280 cycles); SLOT_AUDIO_BUFFER=<frames> overrides it.
++const PERIOD_FRAMES: u32 = 2560;
++
++fn buffer_frames() -> u32 {
++    std::env::var("SLOT_AUDIO_BUFFER")
++        .ok()
++        .and_then(|v| v.trim().parse().ok())
++        .filter(|&n: &u32| n >= 64)
++        .unwrap_or(PERIOD_FRAMES)
++}
+ 
+ fn build(
+     device: &cpal::Device,
+@@ -135,7 +170,7 @@
+     ring.reopen(config.sample_rate().0);
+     let mut cfg = config.config();
+     let fixed = match *config.buffer_size() {
+-        cpal::SupportedBufferSize::Range { min, max } => Some(PERIOD_FRAMES.clamp(min, max)),
++        cpal::SupportedBufferSize::Range { min, max } => Some(buffer_frames().clamp(min, max)),
+         cpal::SupportedBufferSize::Unknown => None,
+     };
+     let mut last = None;
+@@ -148,7 +183,15 @@
+     {
+         cfg.buffer_size = size;
+         match start(device, &cfg, ring) {
+-            Ok(s) => return Ok(s),
++            Ok(s) => {
++                if crate::perf::enabled() {
++                    eprintln!(
++                        "slot: perf: audio stream {} Hz, {} ch, buffer {:?}",
++                        cfg.sample_rate.0, cfg.channels, cfg.buffer_size
++                    );
++                }
++                return Ok(s);
++            }
+             Err(e) => last = Some(e),
+         }
+     }
+@@ -171,6 +214,15 @@
+                 }
+                 let taken = &mut scratch[..out.len()];
+                 ring.fill(taken);
++                {
++                    use std::sync::atomic::Ordering::Relaxed;
++                    use crate::perf::*;
++                    AUDIO_CALLBACKS.fetch_add(1, Relaxed);
++                    AUDIO_FRAMES.fetch_add(out.len() as u64 / 2, Relaxed);
++                    AUDIO_QUEUED.store(ring.queued_frames() as u64, Relaxed);
++                    AUDIO_CAPACITY.store(ring.capacity_frames() as u64, Relaxed);
++                    AUDIO_UNDERRUNS.store(ring.underruns(), Relaxed);
++                }
+                 for (o, s) in out.iter_mut().zip(taken.iter()) {
+                     *o = f32::from(*s) / 32768.0;
+                 }
+--- a/crates/slot/src/host_app.rs
++++ b/crates/slot/src/host_app.rs
+@@ -20,6 +20,7 @@
+     ds: Option<DsPass>,
+     pointer: Option<(f64, f64)>,
+     pressed: bool,
++    perf: slot::perf::Reporter,
+ }
+ 
+ impl Slot {
+@@ -31,6 +32,7 @@
+             ds: None,
+             pointer: None,
+             pressed: false,
++            perf: slot::perf::Reporter::default(),
+         }
+     }
+ }
+@@ -130,6 +132,12 @@
+                     events.exit();
+                     return;
+                 }
++                {
++                    use std::sync::atomic::Ordering::Relaxed;
++                    slot::perf::RENDERED.fetch_add(1, Relaxed);
++                    slot::perf::RENDER_US.fetch_add(began.elapsed().as_micros() as u64, Relaxed);
++                    self.perf.tick();
++                }
+                 if let Some(left) = FRAME.checked_sub(began.elapsed()) {
+                     std::thread::sleep(left);
+                 }
+--- a/crates/slot/src/emu.rs
++++ b/crates/slot/src/emu.rs
+@@ -915,6 +915,7 @@
+                         self.shared.volume.load(Ordering::Relaxed),
+                     );
+                     ring.push_blocking(&out);
++                    crate::perf::EMU_FRAMES.fetch_add(1, Ordering::Relaxed);
+                     paced += 1;
+                     if crate::session::trace() && paced.is_multiple_of(TRACE_EVERY) {
+                         let (dropped, starved) = (ring.overruns(), ring.underruns());
+--- a/crates/slot/src/lib.rs
++++ b/crates/slot/src/lib.rs
+@@ -8,6 +8,7 @@
+ pub mod app;
+ pub mod art;
+ pub mod audio;
++pub mod perf;
+ pub mod baseos;
+ pub mod bezel;
+ pub mod ble;
+--- /dev/null
++++ b/crates/slot/src/perf.rs
+@@ -0,0 +1,65 @@
++//! RG EDC: SLOT_PERF=1 prints a once-per-second line with the render rate,
++//! the emulated frame rate and the audio stream's state, to diagnose pacing
++//! on devices where slot runs through PipeWire.
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::OnceLock;
++use std::time::Instant;
++
++pub static EMU_FRAMES: AtomicU64 = AtomicU64::new(0);
++pub static RENDERED: AtomicU64 = AtomicU64::new(0);
++pub static RENDER_US: AtomicU64 = AtomicU64::new(0);
++pub static AUDIO_CALLBACKS: AtomicU64 = AtomicU64::new(0);
++pub static AUDIO_FRAMES: AtomicU64 = AtomicU64::new(0);
++pub static AUDIO_QUEUED: AtomicU64 = AtomicU64::new(0);
++pub static AUDIO_CAPACITY: AtomicU64 = AtomicU64::new(0);
++pub static AUDIO_UNDERRUNS: AtomicU64 = AtomicU64::new(0);
++
++pub fn enabled() -> bool {
++    static ON: OnceLock<bool> = OnceLock::new();
++    *ON.get_or_init(|| std::env::var_os("SLOT_PERF").is_some_and(|v| v != "0"))
++}
++
++pub struct Reporter {
++    since: Instant,
++    last: [u64; 5],
++}
++
++impl Default for Reporter {
++    fn default() -> Self {
++        Reporter { since: Instant::now(), last: [0; 5] }
++    }
++}
++
++impl Reporter {
++    pub fn tick(&mut self) {
++        if !enabled() {
++            return;
++        }
++        let secs = self.since.elapsed().as_secs_f64();
++        if secs < 1.0 {
++            return;
++        }
++        let now = [
++            EMU_FRAMES.load(Ordering::Relaxed),
++            RENDERED.load(Ordering::Relaxed),
++            RENDER_US.load(Ordering::Relaxed),
++            AUDIO_FRAMES.load(Ordering::Relaxed),
++            AUDIO_UNDERRUNS.load(Ordering::Relaxed),
++        ];
++        let d = |i: usize| now[i].saturating_sub(self.last[i]);
++        let rendered = d(1).max(1);
++        eprintln!(
++            "slot: perf: emu {:.1} fps, render {:.1} fps, frame {:.1} ms, audio {:.0} Hz consumed, queued {}/{} frames, underrun {} frames, callbacks {}",
++            d(0) as f64 / secs,
++            d(1) as f64 / secs,
++            d(2) as f64 / rendered as f64 / 1000.0,
++            d(3) as f64 / secs,
++            AUDIO_QUEUED.load(Ordering::Relaxed),
++            AUDIO_CAPACITY.load(Ordering::Relaxed),
++            d(4),
++            AUDIO_CALLBACKS.swap(0, Ordering::Relaxed),
++        );
++        self.last = now;
++        self.since = Instant::now();
++    }
++}

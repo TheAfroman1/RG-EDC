@@ -1,0 +1,1482 @@
+#!/usr/bin/python
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026-present RG EDC
+#
+# rgedc-phone: the RG Rotate's link to a phone over Bluetooth LE.
+#
+#  * iPhone: we advertise as "RG EDC" and ask for the Apple Notification Center
+#    Service (ANCS). The phone connects from Settings > Bluetooth and pairs, and we
+#    read its notifications as a GATT client. Current Time Service sets the clock.
+#  * Android: we serve the Nordic UART service and speak the Bangle.js protocol
+#    of the Gadgetbridge app (notifications, dismiss, calls, music, time). While
+#    "pair Android" mode is on we advertise as "Espruino RG EDC" so Gadgetbridge
+#    lists us as a supported device.
+#
+# The RG EDC shell talks to us over a Unix socket with one JSON object per line
+# (see Hub below). Runs from rgedc-phone.service next to bluetoothd; the code is
+# plain Python so it can be swapped on the device (/storage/.config/rgedc/rgedc-phone
+# wins over this file, see the service).
+
+import asyncio
+import calendar
+import datetime
+import json
+import logging
+import os
+import re
+import signal
+import struct
+import subprocess
+import sys
+import time
+
+VERSION = "0.1"
+
+# ---------------------------------------------------------------------------
+# Paths and settings (environment overrides are for testing off the device)
+
+SOCK_PATH = os.environ.get("RGEDC_PHONE_SOCK", "/run/rgedc-phone.sock")
+STATE_DIR = os.environ.get("RGEDC_PHONE_STATE", "/storage/.config/rgedc")
+CACHE_DIR = os.environ.get("RGEDC_PHONE_CACHE", "/storage/.cache/rgedc")
+LOG_FILE = os.environ.get("RGEDC_PHONE_LOG", "/var/log/rgedc-phone.log")
+BUS_KIND = os.environ.get("RGEDC_PHONE_BUS", "system")
+SET_CLOCK = os.environ.get("RGEDC_PHONE_SET_CLOCK", "1") == "1"
+
+NAME = "RG EDC"
+ANDROID_NAME = "Espruino RG EDC"   # Gadgetbridge matches "Espruino.*"
+MAX_ITEMS = 50
+PREEXISTING_FETCH = 30             # pre-existing iOS notifications to read on connect
+PAIRING_SECONDS = 180
+
+log = logging.getLogger("rgedc-phone")
+
+# ---------------------------------------------------------------------------
+# UUIDs
+
+def uuid16(n):
+    return "0000%04x-0000-1000-8000-00805f9b34fb" % n
+
+ANCS_SERVICE = "7905f431-b5ce-4e99-a40f-4b1e122d00d0"
+ANCS_NS = "9fbf120d-6301-42d9-8c58-25e699a21dbd"   # notification source
+ANCS_CP = "69d1d8f3-45e1-49a8-9821-9bbdfdaad9d9"   # control point
+ANCS_DS = "22eac6e9-24d6-4bb5-be44-b36ace7c7bfb"   # data source
+AMS_SERVICE = "89d3502b-0f36-433a-8ef4-c502ad55f8dc"
+CTS_SERVICE = uuid16(0x1805)
+CTS_CURRENT = uuid16(0x2A2B)
+CTS_LOCALINFO = uuid16(0x2A0F)
+# Services only Apple devices publish: tells an iPhone from anything else.
+APPLE_SERVICES = {ANCS_SERVICE, AMS_SERVICE,
+                  "d0611e78-bbb4-4591-a5f8-487910ae4366",   # Continuity
+                  "9fa480e0-4967-4542-9390-d343dc5d04ae"}   # Nearby
+APPLE_COMPANY_ID = 0x004C
+
+NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # phone writes here
+NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # we notify here
+
+# ---------------------------------------------------------------------------
+# ANCS protocol (pure, no D-Bus; see tests/test_rgedc_phone.py)
+
+EV_ADDED, EV_MODIFIED, EV_REMOVED = 0, 1, 2
+FL_SILENT, FL_IMPORTANT, FL_PREEXISTING, FL_POSITIVE, FL_NEGATIVE = 1, 2, 4, 8, 16
+CATEGORIES = ["other", "call", "missed-call", "voicemail", "social", "schedule",
+              "email", "news", "fitness", "finance", "location", "entertainment"]
+
+CMD_NOTIF_ATTRS, CMD_APP_ATTRS, CMD_ACTION = 0, 1, 2
+A_APPID, A_TITLE, A_SUBTITLE, A_MESSAGE, A_MSGSIZE, A_DATE, A_POS, A_NEG = range(8)
+NOTIF_ATTRS = [(A_APPID, None), (A_TITLE, 64), (A_SUBTITLE, 64), (A_MESSAGE, 400),
+               (A_DATE, None), (A_POS, None), (A_NEG, None)]
+ACTION_POSITIVE, ACTION_NEGATIVE = 0, 1
+
+
+def ancs_parse_ns(data):
+    """Notification Source packet -> dict, or None if malformed."""
+    data = bytes(data)
+    if len(data) < 8:
+        return None
+    ev, flags, cat, count, uid = struct.unpack("<BBBBI", data[:8])
+    return {"event": ev, "flags": flags, "category": cat, "count": count, "uid": uid}
+
+
+def ancs_cmd_notif_attrs(uid, attrs=NOTIF_ATTRS):
+    out = bytearray(struct.pack("<BI", CMD_NOTIF_ATTRS, uid))
+    for aid, maxlen in attrs:
+        out.append(aid)
+        if maxlen is not None:
+            out += struct.pack("<H", maxlen)
+    return bytes(out)
+
+
+def ancs_cmd_app_attrs(app_id):
+    return bytes([CMD_APP_ATTRS]) + app_id.encode() + b"\0" + bytes([0])
+
+
+def ancs_cmd_action(uid, positive):
+    return struct.pack("<BIB", CMD_ACTION, uid, ACTION_POSITIVE if positive else ACTION_NEGATIVE)
+
+
+class AncsResponse:
+    """Reassembles one Data Source response, which can span several packets."""
+
+    def __init__(self, cmd, attr_ids, app_id=None):
+        self.cmd = cmd
+        self.attr_ids = list(attr_ids)
+        self.app_id = app_id
+        self.buf = b""
+        self.uid = None
+        self.attrs = {}
+
+    def feed(self, data):
+        """Adds a packet; returns True once every attribute has arrived."""
+        self.buf += bytes(data)
+        b = self.buf
+        if not b:
+            return False
+        if b[0] != self.cmd:
+            raise ValueError("unexpected ANCS command id %d" % b[0])
+        if self.cmd == CMD_NOTIF_ATTRS:
+            if len(b) < 5:
+                return False
+            self.uid = struct.unpack("<I", b[1:5])[0]
+            pos = 5
+        else:
+            end = b.find(b"\0", 1)
+            if end < 0:
+                return False
+            self.app_id = b[1:end].decode("utf-8", "replace")
+            pos = end + 1
+        attrs = {}
+        for _ in self.attr_ids:
+            if len(b) < pos + 3:
+                return False
+            aid, ln = struct.unpack("<BH", b[pos:pos + 3])
+            if len(b) < pos + 3 + ln:
+                return False
+            attrs[aid] = b[pos + 3:pos + 3 + ln].decode("utf-8", "replace")
+            pos += 3 + ln
+        self.attrs = attrs
+        return True
+
+
+def ancs_date(s):
+    """'yyyyMMddTHHmmSS' (phone local time) -> epoch seconds, or None."""
+    try:
+        return time.mktime(time.strptime(s, "%Y%m%dT%H%M%S"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def cts_to_utc(current, localinfo=None):
+    """Current Time (0x2A2B) and Local Time Information (0x2A0F) -> UTC epoch."""
+    current = bytes(current)
+    if len(current) < 7:
+        return None
+    year, month, day, hh, mm, ss = struct.unpack("<HBBBBB", current[:7])
+    if year < 2000 or not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    local = calendar.timegm((year, month, day, hh, mm, ss, 0, 0, 0))
+    offset = 0
+    if localinfo is not None and len(bytes(localinfo)) >= 2:
+        tz, dst = struct.unpack("<bB", bytes(localinfo)[:2])
+        if tz != -128:
+            offset += tz * 15 * 60
+        if dst != 255:
+            offset += {0: 0, 2: 1800, 4: 3600, 8: 7200}.get(dst, 0)
+    return local - offset
+
+# ---------------------------------------------------------------------------
+# Gadgetbridge / Bangle.js protocol (pure)
+
+class EspruinoJSONError(ValueError):
+    pass
+
+
+def parse_espruino_json(s):
+    """Parses the JSON-ish text Gadgetbridge sends to Bangle.js: JSON plus
+    \\xNN and \\N escapes, \\v, and atob("base64") strings."""
+    import base64
+    pos = 0
+    n = len(s)
+
+    def ws():
+        nonlocal pos
+        while pos < n and s[pos] in " \t\r\n":
+            pos += 1
+
+    def string():
+        nonlocal pos
+        q = s[pos]
+        pos += 1
+        out = []
+        while True:
+            if pos >= n:
+                raise EspruinoJSONError("unterminated string")
+            c = s[pos]
+            if c == q:
+                pos += 1
+                return "".join(out)
+            if c != "\\":
+                out.append(c)
+                pos += 1
+                continue
+            pos += 1
+            if pos >= n:
+                raise EspruinoJSONError("bad escape")
+            e = s[pos]
+            pos += 1
+            simple = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v",
+                      '"': '"', "'": "'", "\\": "\\", "/": "/"}
+            if e in simple:
+                out.append(simple[e])
+            elif e == "x":
+                out.append(chr(int(s[pos:pos + 2], 16)))
+                pos += 2
+            elif e == "u":
+                out.append(chr(int(s[pos:pos + 4], 16)))
+                pos += 4
+            elif e in "01234567":
+                # Octal, one to three digits (\0, \20 = DLE, \x0N is hex above)
+                j = pos
+                while j < n and j < pos + 2 and s[j] in "01234567":
+                    j += 1
+                out.append(chr(int(e + s[pos:j], 8)))
+                pos = j
+            else:
+                out.append(e)
+
+    def value():
+        nonlocal pos
+        ws()
+        if pos >= n:
+            raise EspruinoJSONError("unexpected end")
+        c = s[pos]
+        if c == "{":
+            pos += 1
+            obj = {}
+            ws()
+            if pos < n and s[pos] == "}":
+                pos += 1
+                return obj
+            while True:
+                ws()
+                if s[pos] in "\"'":
+                    k = string()
+                else:
+                    m = re.compile(r"[A-Za-z_$][\w$]*").match(s, pos)
+                    if not m:
+                        raise EspruinoJSONError("bad key at %d" % pos)
+                    k = m.group(0)
+                    pos = m.end()
+                ws()
+                if pos >= n or s[pos] != ":":
+                    raise EspruinoJSONError("expected : at %d" % pos)
+                pos += 1
+                obj[k] = value()
+                ws()
+                if pos < n and s[pos] == ",":
+                    pos += 1
+                    continue
+                if pos < n and s[pos] == "}":
+                    pos += 1
+                    return obj
+                raise EspruinoJSONError("expected , or } at %d" % pos)
+        if c == "[":
+            pos += 1
+            arr = []
+            ws()
+            if pos < n and s[pos] == "]":
+                pos += 1
+                return arr
+            while True:
+                arr.append(value())
+                ws()
+                if pos < n and s[pos] == ",":
+                    pos += 1
+                    continue
+                if pos < n and s[pos] == "]":
+                    pos += 1
+                    return arr
+                raise EspruinoJSONError("expected , or ] at %d" % pos)
+        if c in "\"'":
+            return string()
+        if s.startswith("atob(", pos):
+            pos += 5
+            ws()
+            enc = string()
+            ws()
+            if pos >= n or s[pos] != ")":
+                raise EspruinoJSONError("bad atob")
+            pos += 1
+            return base64.b64decode(enc + "=" * (-len(enc) % 4)).decode("latin-1")
+        for word, val in (("true", True), ("false", False), ("null", None), ("undefined", None)):
+            if s.startswith(word, pos):
+                pos += len(word)
+                return val
+        m = re.compile(r"-?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?").match(s, pos)
+        if m:
+            pos = m.end()
+            t = m.group(0)
+            return float(t) if any(ch in t for ch in ".eE") else int(t)
+        raise EspruinoJSONError("unexpected %r at %d" % (c, pos))
+
+    v = value()
+    ws()
+    if pos != n:
+        raise EspruinoJSONError("trailing data at %d" % pos)
+    return v
+
+
+def latin1_to_text(s):
+    """Gadgetbridge sends Java chars as single bytes (<=255) or \\uXXXX; UTF-16
+    surrogate pairs come through as two \\u escapes. Join them back up."""
+    try:
+        return s.encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeError:
+        return s
+
+
+def gb_parse_line(line):
+    """One line from Gadgetbridge -> list of (kind, payload)."""
+    out = []
+    line = line.strip().lstrip("\x10\x03").strip()
+    if not line:
+        return out
+    for part in re.split(r";\s*(?=[A-Za-z\x10])", line):
+        part = part.strip().lstrip("\x10").strip()
+        if part.startswith("GB(") and part.endswith(")"):
+            try:
+                obj = parse_espruino_json(part[3:-1])
+            except (EspruinoJSONError, ValueError, IndexError) as e:
+                log.warning("bad GB() payload: %s (%s)", part[:120], e)
+                continue
+            if isinstance(obj, dict):
+                out.append(("gb", obj))
+            continue
+        m = re.match(r"setTime\((\d+(?:\.\d+)?)\)", part)
+        if m:
+            out.append(("time", float(m.group(1))))
+            continue
+        m = re.match(r"E\.setTimeZone\((-?\d+(?:\.\d+)?)\)", part)
+        if m:
+            out.append(("tz", float(m.group(1))))
+            continue
+    return out
+
+
+def gb_line(obj):
+    """Our reply to Gadgetbridge: one JSON line. It drops the char before \\n."""
+    return (json.dumps(obj, separators=(",", ":")) + "\r\n").encode("utf-8")
+
+# ---------------------------------------------------------------------------
+# Notification store
+
+class Store:
+    def __init__(self, path):
+        self.path = path
+        self.items = []
+        self.listeners = []
+        self.load()
+
+    def load(self):
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+            self.items = [i for i in data.get("items", []) if isinstance(i, dict) and "id" in i]
+        except (OSError, ValueError):
+            self.items = []
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"items": self.items}, f)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            log.warning("could not save notifications: %s", e)
+
+    def changed(self, posted=None):
+        self.save()
+        for fn in self.listeners:
+            fn(posted)
+
+    def get(self, nid):
+        for i in self.items:
+            if i["id"] == nid:
+                return i
+        return None
+
+    def put(self, item, announce):
+        """Adds or replaces (same id). announce: tell the shell to pop a banner."""
+        old = self.get(item["id"])
+        if old is not None:
+            item.setdefault("read", old.get("read", False))
+            self.items.remove(old)
+        item.setdefault("read", False)
+        self.items.append(item)
+        self.items.sort(key=lambda i: i.get("time", 0), reverse=True)
+        del self.items[MAX_ITEMS:]
+        self.changed(item if announce else None)
+
+    def remove(self, nid):
+        i = self.get(nid)
+        if i is not None:
+            self.items.remove(i)
+            self.changed()
+
+    def remove_where(self, pred):
+        before = len(self.items)
+        self.items = [i for i in self.items if not pred(i)]
+        if len(self.items) != before:
+            self.changed()
+
+    def mark_read(self):
+        if any(not i.get("read") for i in self.items):
+            for i in self.items:
+                i["read"] = True
+            self.changed()
+
+# ---------------------------------------------------------------------------
+# Clock
+
+def set_clock(utc, source):
+    if not SET_CLOCK or utc is None:
+        return
+    drift = utc - time.time()
+    if abs(drift) < 2:
+        return
+    try:
+        time.clock_settime(time.CLOCK_REALTIME, utc)
+        log.info("clock set from %s (was %+.0f s off)", source, -drift)
+        subprocess.run(["hwclock", "--systohc", "--utc"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("could not set clock: %s", e)
+
+# ---------------------------------------------------------------------------
+# Battery, for Gadgetbridge's status line
+
+def battery():
+    base = "/sys/class/power_supply/battery"
+    try:
+        with open(base + "/capacity") as f:
+            cap = int(f.read().strip())
+        with open(base + "/status") as f:
+            chg = f.read().strip() == "Charging"
+        return cap, chg
+    except (OSError, ValueError):
+        return None, False
+
+# ---------------------------------------------------------------------------
+# Everything below needs D-Bus.
+
+def unv(v):
+    """dbussy variant (Signature, value) -> value."""
+    if isinstance(v, tuple) and len(v) == 2 and type(v[0]).__name__ == "Signature":
+        return v[1]
+    return v
+
+
+def unprops(d):
+    return {k: unv(v) for k, v in (d or {}).items()}
+
+
+def build_dbus_classes(ravel):
+    """The exported objects (advertisement, GATT service and characteristics)."""
+
+    @ravel.interface(ravel.INTERFACE.SERVER, name="org.bluez.LEAdvertisement1")
+    class Advertisement:
+        def __init__(self, link):
+            self.link = link
+
+        @ravel.method(name="Release", in_signature="", out_signature="")
+        def release(self):
+            log.info("advertisement released by bluetoothd")
+            self.link.adv_registered = False
+
+        @ravel.propgetter(name="Type", type="s")
+        def get_type(self):
+            return "peripheral"
+
+        @ravel.propgetter(name="LocalName", type="s")
+        def get_name(self):
+            return ANDROID_NAME if self.link.pairing == "android" else NAME
+
+        @ravel.propgetter(name="SolicitUUIDs", type="as")
+        def get_solicit(self):
+            # 128-bit solicitation + name fill the 31 byte advertisement; the
+            # Gadgetbridge name is longer, so it goes alone.
+            return [] if self.link.pairing == "android" else [ANCS_SERVICE]
+
+        @ravel.propgetter(name="Discoverable", type="b")
+        def get_discoverable(self):
+            return True
+
+    @ravel.interface(ravel.INTERFACE.SERVER, name="org.bluez.GattService1")
+    class Service:
+        def __init__(self, uuid):
+            self.uuid = uuid
+
+        @ravel.propgetter(name="UUID", type="s")
+        def get_uuid(self):
+            return self.uuid
+
+        @ravel.propgetter(name="Primary", type="b")
+        def get_primary(self):
+            return True
+
+    @ravel.interface(ravel.INTERFACE.SERVER, name="org.bluez.GattCharacteristic1")
+    class Characteristic:
+        def __init__(self, link, uuid, service, flags):
+            self.link = link
+            self.uuid = uuid
+            self.service = service
+            self.flags = flags
+            self.value = b""
+            self.notifying = False
+
+        @ravel.propgetter(name="UUID", type="s")
+        def get_uuid(self):
+            return self.uuid
+
+        @ravel.propgetter(name="Service", type="o")
+        def get_service(self):
+            return self.service
+
+        @ravel.propgetter(name="Flags", type="as")
+        def get_flags(self):
+            return self.flags
+
+        @ravel.method(name="ReadValue", in_signature="a{sv}", out_signature="ay")
+        def read_value(self, options):
+            return [self.value]
+
+        @ravel.method(name="WriteValue", in_signature="aya{sv}", out_signature="")
+        def write_value(self, value, options):
+            opts = unprops(options)
+            self.link.on_nus_write(bytes(value), str(opts.get("device", "")))
+
+        @ravel.method(name="StartNotify", in_signature="", out_signature="")
+        def start_notify(self):
+            self.notifying = True
+            self.link.on_nus_notify(True)
+
+        @ravel.method(name="StopNotify", in_signature="", out_signature="")
+        def stop_notify(self):
+            self.notifying = False
+            self.link.on_nus_notify(False)
+
+    return Advertisement, Service, Characteristic
+
+
+class Link:
+    """Owns the BlueZ side: advertising, the GATT server, ANCS sessions and the
+    Gadgetbridge link. Reports to the Hub (the shell socket)."""
+
+    APP_PATH = "/rgedc/phone"
+    ADV_PATH = "/rgedc/phone/adv0"
+
+    def __init__(self, store, loop):
+        import dbussy
+        import ravel
+        self.dbus = dbussy
+        self.ravel = ravel
+        self.store = store
+        self.loop = loop
+        self.bus = None
+        self.adapter = None
+        self.adapter_powered = False
+        self.adv_registered = False
+        self.adv_error = ""
+        self.app_registered = False
+        self.pairing = ""            # "", "ios" or "android"
+        self.pairing_task = None
+        self.objects = {}            # path -> {iface: props}, mirror of BlueZ
+        self.ios = {}                # device path -> AncsSession
+        self.gb_dev = ""             # device path of the Gadgetbridge phone
+        self.gb_buf = b""
+        self.gb_notifying = False
+        self.gb_last = 0.0
+        self.phone_music = {}
+        self.known = self.load_known()
+        self.app_names = self.load_app_names()
+        self.on_state = lambda note=None: None
+        self.on_call = lambda call: None
+        self.pair_tasks = {}
+
+    # ----- persistence
+
+    def load_known(self):
+        try:
+            with open(os.path.join(STATE_DIR, "phone.json")) as f:
+                return [p for p in json.load(f).get("phones", []) if "address" in p]
+        except (OSError, ValueError):
+            return []
+
+    def save_known(self):
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(os.path.join(STATE_DIR, "phone.json"), "w") as f:
+                json.dump({"phones": self.known}, f, indent=1)
+        except OSError as e:
+            log.warning("could not save phone.json: %s", e)
+
+    def remember(self, path, kind):
+        dev = self.objects.get(path, {}).get("org.bluez.Device1", {})
+        addr = dev.get("Address", "")
+        if not addr:
+            return
+        name = dev.get("Alias") or dev.get("Name") or addr
+        for p in self.known:
+            if p["address"] == addr:
+                if p.get("name") != name or p.get("kind") != kind:
+                    p.update(name=name, kind=kind)
+                    self.save_known()
+                return
+        self.known.append({"address": addr, "name": name, "kind": kind})
+        self.save_known()
+        log.info("remembered %s phone %s (%s)", kind, name, addr)
+
+    def load_app_names(self):
+        try:
+            with open(os.path.join(CACHE_DIR, "ancs-apps.json")) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def save_app_names(self):
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(os.path.join(CACHE_DIR, "ancs-apps.json"), "w") as f:
+                json.dump(self.app_names, f)
+        except OSError:
+            pass
+
+    # ----- D-Bus helpers
+
+    async def call(self, path, iface, method, sig="", *args, timeout=25000, dest="org.bluez"):
+        msg = self.dbus.Message.new_method_call(dest, path, iface, method)
+        if sig:
+            msg.append_objects(sig, *args)
+        reply = await self.bus.connection.send_await_reply(msg, timeout)
+        return reply.expect_return_objects(reply.signature)
+
+    async def set_prop(self, path, iface, name, sig, value):
+        await self.call(path, "org.freedesktop.DBus.Properties", "Set", "ssv",
+                        iface, name, (sig, value))
+
+    def dev(self, path):
+        return self.objects.get(path, {}).get("org.bluez.Device1", {})
+
+    def dev_name(self, path):
+        d = self.dev(path)
+        return d.get("Alias") or d.get("Name") or d.get("Address") or "Phone"
+
+    def children(self, prefix, iface):
+        return [(p, i[iface]) for p, i in self.objects.items()
+                if p.startswith(prefix + "/") and iface in i]
+
+    def gatt_service(self, dev_path, uuid):
+        for p, props in self.children(dev_path, "org.bluez.GattService1"):
+            if props.get("UUID", "").lower() == uuid:
+                return p
+        return None
+
+    def gatt_char(self, svc_path, uuid):
+        for p, props in self.children(svc_path, "org.bluez.GattCharacteristic1"):
+            if props.get("UUID", "").lower() == uuid:
+                return p
+        return None
+
+    # ----- start-up
+
+    async def start(self):
+        ravel = self.ravel
+        if BUS_KIND == "session":
+            self.bus = await ravel.session_bus_async(loop=self.loop, managed_objects=True)
+        else:
+            self.bus = await ravel.system_bus_async(loop=self.loop, managed_objects=True)
+
+        Advertisement, Service, Characteristic = build_dbus_classes(ravel)
+        self.adv = Advertisement(self)
+        self.bus.register(path=self.ADV_PATH, fallback=False, interface=self.adv)
+        svc = self.APP_PATH + "/service0"
+        self.nus_rx = Characteristic(self, NUS_RX, svc, ["write", "write-without-response"])
+        self.nus_tx = Characteristic(self, NUS_TX, svc, ["notify"])
+        self.bus.register(path=svc, fallback=False, interface=Service(NUS_SERVICE))
+        self.bus.register(path=svc + "/char0", fallback=False, interface=self.nus_rx)
+        self.bus.register(path=svc + "/char1", fallback=False, interface=self.nus_tx)
+        for p in (svc, svc + "/char0", svc + "/char1"):
+            self.bus.object_added(p)
+        self.tx_path = svc + "/char1"
+
+        link = self
+
+        @ravel.signal(name="InterfacesAdded", in_signature="oa{sa{sv}}")
+        def added(path, ifaces):
+            link.on_added(str(path), ifaces)
+
+        @ravel.signal(name="InterfacesRemoved", in_signature="oas")
+        def removed(path, ifaces):
+            link.on_removed(str(path), ifaces)
+
+        @ravel.signal(name="PropertiesChanged", in_signature="sa{sv}as", message_keyword="message")
+        def propchanged(iface, changed, invalidated, message=None):
+            link.on_props(str(message.path), iface, changed)
+
+        @ravel.signal(name="NameOwnerChanged", in_signature="sss")
+        def owner(name, old, new):
+            if name == "org.bluez":
+                link.loop.create_task(link.on_bluez_owner(bool(new)))
+
+        self.bus.listen_objects_added(added)
+        self.bus.listen_objects_removed(removed)
+        self.bus.listen_propchanged(path="/org/bluez", fallback=True, interface=None, func=propchanged)
+        self.bus.listen_signal(path="/org/freedesktop/DBus", fallback=False,
+                               interface="org.freedesktop.DBus", name="NameOwnerChanged", func=owner)
+        await self.sync()
+        self.loop.create_task(self.status_loop())
+
+    async def on_bluez_owner(self, up):
+        log.info("bluetoothd %s", "appeared" if up else "went away")
+        self.adv_registered = self.app_registered = False
+        if up:
+            await asyncio.sleep(1)
+            await self.sync()
+        else:
+            self.objects = {}
+            self.adapter = None
+            self.ios.clear()
+            self.gb_dev = ""
+            self.on_state()
+
+    async def sync(self):
+        """Reads BlueZ's object tree, then sets up the adapter."""
+        try:
+            res = await self.call("/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects")
+        except self.dbus.DBusError as e:
+            log.warning("bluetoothd not reachable: %s", e)
+            self.adapter = None
+            self.on_state()
+            return
+        self.objects = {}
+        for path, ifaces in res[0].items():
+            self.objects[str(path)] = {i: unprops(p) for i, p in ifaces.items()}
+        adapters = sorted(p for p, i in self.objects.items() if "org.bluez.Adapter1" in i)
+        self.adapter = adapters[0] if adapters else None
+        if not self.adapter:
+            log.warning("no Bluetooth adapter")
+            self.on_state()
+            return
+        self.adapter_powered = bool(self.objects[self.adapter]["org.bluez.Adapter1"].get("Powered"))
+        await self.setup_adapter()
+        for path in list(self.objects):
+            self.check_device(path)
+        self.on_state()
+
+    async def setup_adapter(self):
+        ad = self.objects[self.adapter]["org.bluez.Adapter1"]
+        try:
+            if ad.get("Alias") != NAME:
+                await self.set_prop(self.adapter, "org.bluez.Adapter1", "Alias", "s", NAME)
+        except self.dbus.DBusError as e:
+            log.warning("could not set the adapter name: %s", e)
+        if not self.adapter_powered:
+            log.info("adapter is off; waiting for it to power on")
+            return
+        if not self.app_registered:
+            try:
+                await self.call(self.adapter, "org.bluez.GattManager1", "RegisterApplication",
+                                "oa{sv}", self.APP_PATH, {})
+                self.app_registered = True
+                log.info("GATT service registered (Gadgetbridge link)")
+            except self.dbus.DBusError as e:
+                log.error("RegisterApplication failed: %s", e)
+        await self.advertise()
+
+    def phone_connected(self):
+        return any(s.ready for s in self.ios.values()) or bool(self.gb_dev)
+
+    async def advertise(self):
+        """Advertise while no phone is connected (and while pairing)."""
+        if not hasattr(self, "adv_lock"):
+            self.adv_lock = asyncio.Lock()
+        async with self.adv_lock:
+            await self._advertise()
+
+    async def _advertise(self):
+        want = self.adapter_powered and (not self.phone_connected() or self.pairing != "")
+        if self.adv_registered and (not want or getattr(self, "adv_mode", "") != self.pairing):
+            try:
+                await self.call(self.adapter, "org.bluez.LEAdvertisingManager1",
+                                "UnregisterAdvertisement", "o", self.ADV_PATH)
+            except self.dbus.DBusError as e:
+                log.debug("UnregisterAdvertisement: %s", e)
+            self.adv_registered = False
+        if want and not self.adv_registered:
+            try:
+                await self.call(self.adapter, "org.bluez.LEAdvertisingManager1",
+                                "RegisterAdvertisement", "oa{sv}", self.ADV_PATH, {})
+                self.adv_registered = True
+                self.adv_mode = self.pairing
+                self.adv_error = ""
+                log.info("advertising as %r", ANDROID_NAME if self.pairing == "android" else NAME)
+            except self.dbus.DBusError as e:
+                self.adv_error = str(e)
+                log.error("RegisterAdvertisement failed: %s", e)
+        self.on_state()
+
+    # ----- BlueZ object tree
+
+    def on_added(self, path, ifaces):
+        entry = self.objects.setdefault(path, {})
+        for i, p in ifaces.items():
+            entry[i] = unprops(p)
+        if "org.bluez.Adapter1" in ifaces and not self.adapter:
+            self.loop.create_task(self.sync())
+            return
+        if "org.bluez.GattService1" in ifaces:
+            dev = path.rsplit("/", 1)[0]
+            self.check_device(dev)
+
+    def on_removed(self, path, ifaces):
+        entry = self.objects.get(path)
+        if entry is None:
+            return
+        for i in ifaces:
+            entry.pop(i, None)
+        if not entry:
+            del self.objects[path]
+        if "org.bluez.Device1" in ifaces:
+            self.device_gone(path)
+        if "org.bluez.Adapter1" in ifaces and path == self.adapter:
+            self.adapter = None
+            self.adv_registered = self.app_registered = False
+            self.on_state()
+
+    def on_props(self, path, iface, changed):
+        props = unprops(changed)
+        entry = self.objects.setdefault(path, {}).setdefault(iface, {})
+        entry.update(props)
+        if iface == "org.bluez.GattCharacteristic1" and "Value" in props:
+            for s in self.ios.values():
+                s.on_value(path, bytes(props["Value"]))
+        elif iface == "org.bluez.Adapter1" and path == self.adapter and "Powered" in props:
+            self.adapter_powered = bool(props["Powered"])
+            if self.adapter_powered:
+                self.loop.create_task(self.setup_adapter())
+            else:
+                self.adv_registered = self.app_registered = False
+                self.on_state()
+        elif iface == "org.bluez.Device1":
+            if props.get("Connected") is False:
+                self.device_gone(path)
+            else:
+                self.check_device(path)
+
+    def device_gone(self, path):
+        changed = False
+        s = self.ios.pop(path, None)
+        if s:
+            s.close()
+            log.info("iPhone %s disconnected", self.dev_name(path))
+            changed = True
+        if path == self.gb_dev:
+            log.info("Gadgetbridge phone %s disconnected", self.dev_name(path))
+            self.gb_dev = ""
+            self.gb_buf = b""
+            changed = True
+        if changed:
+            self.on_call(None)
+            self.loop.create_task(self.advertise())
+
+    def is_apple(self, path):
+        d = self.dev(path)
+        uuids = {u.lower() for u in d.get("UUIDs", [])}
+        if uuids & APPLE_SERVICES:
+            return True
+        md = d.get("ManufacturerData") or {}
+        if APPLE_COMPANY_ID in md:
+            return True
+        return any(self.gatt_service(path, u) for u in (ANCS_SERVICE, AMS_SERVICE))
+
+    def check_device(self, path):
+        """Starts an ANCS session once a connected iPhone is paired and resolved."""
+        d = self.dev(path)
+        if not d or not d.get("Connected") or path in self.ios:
+            return
+        if not self.is_apple(path):
+            return
+        if not d.get("Paired"):
+            if path not in self.pair_tasks:
+                self.pair_tasks[path] = self.loop.create_task(self.pair(path))
+            return
+        if not d.get("ServicesResolved"):
+            return
+        svc = self.gatt_service(path, ANCS_SERVICE)
+        if not svc:
+            return
+        s = AncsSession(self, path, svc)
+        self.ios[path] = s
+        self.loop.create_task(s.start())
+
+    async def pair(self, path):
+        name = self.dev_name(path)
+        try:
+            log.info("pairing with iPhone %s (accept on the phone)", name)
+            self.on_state(note="Accept the pairing request on the iPhone")
+            await self.call(path, "org.bluez.Device1", "Pair", timeout=60000)
+            log.info("paired with %s", name)
+        except self.dbus.DBusError as e:
+            if "AlreadyExists" not in str(e):
+                log.warning("pairing with %s failed: %s", name, e)
+        finally:
+            self.pair_tasks.pop(path, None)
+        try:
+            await self.set_prop(path, "org.bluez.Device1", "Trusted", "b", True)
+        except self.dbus.DBusError:
+            pass
+        self.check_device(path)
+
+    # ----- pairing mode (shell)
+
+    def set_pairing(self, kind):
+        kind = kind if kind in ("ios", "android") else ""
+        if self.pairing_task:
+            self.pairing_task.cancel()
+            self.pairing_task = None
+        self.pairing = kind
+        if kind:
+            async def expire():
+                await asyncio.sleep(PAIRING_SECONDS)
+                self.pairing_task = None
+                self.set_pairing("")
+            self.pairing_task = self.loop.create_task(expire())
+        self.loop.create_task(self.advertise())
+
+    async def forget(self):
+        """Unpairs every phone we know and drops their notifications."""
+        addrs = {p["address"] for p in self.known}
+        for path, ifaces in list(self.objects.items()):
+            d = ifaces.get("org.bluez.Device1")
+            if d and d.get("Address") in addrs and self.adapter:
+                try:
+                    await self.call(self.adapter, "org.bluez.Adapter1", "RemoveDevice", "o", path)
+                    log.info("forgot %s", d.get("Alias") or d.get("Address"))
+                except self.dbus.DBusError as e:
+                    log.warning("RemoveDevice %s: %s", path, e)
+        self.known = []
+        self.save_known()
+        self.store.remove_where(lambda i: True)
+        await self.advertise()
+
+    # ----- Gadgetbridge (Nordic UART)
+
+    def on_nus_notify(self, on):
+        self.gb_notifying = on
+
+    def on_nus_write(self, data, device):
+        if device and device != self.gb_dev:
+            self.gb_dev = device
+            self.gb_buf = b""
+            log.info("Gadgetbridge connected from %s", self.dev_name(device))
+            self.remember(device, "android")
+            if self.pairing == "android":
+                self.set_pairing("")
+            self.loop.create_task(self.advertise())
+            self.loop.call_later(1.0, self.gb_hello)
+        self.gb_last = time.time()
+        self.gb_buf += data
+        while b"\n" in self.gb_buf:
+            line, self.gb_buf = self.gb_buf.split(b"\n", 1)
+            text = line.decode("latin-1")
+            log.debug("GB <- %s", text[:200])
+            for kind, payload in gb_parse_line(text):
+                self.on_gb(kind, payload)
+        if len(self.gb_buf) > 65536:
+            self.gb_buf = b""
+
+    def gb_hello(self):
+        self.gb_send({"t": "ver", "fw": "RG EDC " + VERSION, "hw": "RG Rotate"})
+        self.gb_status()
+
+    def gb_status(self):
+        cap, chg = battery()
+        if cap is not None:
+            self.gb_send({"t": "status", "bat": cap, "chg": 1 if chg else 0})
+
+    def gb_send(self, obj):
+        if not self.gb_dev:
+            return
+        data = gb_line(obj)
+        # BlueZ sends a notification per PropertiesChanged; keep packets small
+        # enough for the default MTU (23 - 3 bytes).
+        for i in range(0, len(data), 20):
+            self.emit_value(self.tx_path, data[i:i + 20])
+
+    def emit_value(self, path, value):
+        msg = self.dbus.Message.new_signal(path, "org.freedesktop.DBus.Properties", "PropertiesChanged")
+        msg.append_objects("sa{sv}as", "org.bluez.GattCharacteristic1", {"Value": ("ay", list(value))}, [])
+        self.bus.connection.send(msg)
+
+    def on_gb(self, kind, p):
+        if kind == "time":
+            set_clock(p, "Gadgetbridge")
+            return
+        if kind == "tz":
+            log.info("phone time zone offset %+g h", p)
+            return
+        t = p.get("t")
+        if t == "notify":
+            nid = "gb:%s" % p.get("id")
+            title = latin1_to_text(str(p.get("title") or p.get("sender") or ""))
+            body = latin1_to_text(str(p.get("body") or ""))
+            subject = latin1_to_text(str(p.get("subject") or ""))
+            app = latin1_to_text(str(p.get("src") or "Android"))
+            self.store.put({"id": nid, "src": "android", "app": app, "appId": app,
+                            "title": title, "subtitle": subject, "body": body,
+                            "time": time.time(), "category": "other",
+                            "pos": "", "neg": "Dismiss"}, announce=True)
+        elif t == "notify-":
+            self.store.remove("gb:%s" % p.get("id"))
+        elif t == "call":
+            cmd = str(p.get("cmd", ""))
+            if cmd in ("incoming", "outgoing", "start"):
+                self.on_call({"src": "android", "state": cmd,
+                              "name": latin1_to_text(str(p.get("name") or "")),
+                              "number": str(p.get("number") or ""), "id": "gb:call"})
+            else:
+                self.on_call(None)
+        elif t in ("musicinfo", "musicstate"):
+            self.phone_music.update({k: v for k, v in p.items() if k != "t"})
+            self.on_state()
+        elif t == "find":
+            if p.get("n"):
+                self.store.put({"id": "gb:find", "src": "android", "app": "Gadgetbridge",
+                                "appId": "find", "title": "Find my RG EDC",
+                                "subtitle": "", "body": "Your phone is looking for this device.",
+                                "time": time.time(), "category": "other", "pos": "", "neg": "Dismiss"},
+                               announce=True)
+        else:
+            log.debug("GB message %s ignored", t)
+
+    def gb_dismiss(self, item):
+        try:
+            nid = int(item["id"].split(":", 1)[1])
+        except (ValueError, IndexError):
+            return
+        self.gb_send({"t": "notify", "id": nid, "n": "DISMISS"})
+
+    async def status_loop(self):
+        while True:
+            await asyncio.sleep(600)
+            if self.gb_dev:
+                self.gb_status()
+
+    # ----- shell actions
+
+    def dismiss(self, nid):
+        item = self.store.get(nid)
+        if not item:
+            return
+        if item.get("src") == "ios":
+            s = self.ios_session()
+            if s and item.get("neg"):
+                s.action(item["uid"], positive=False)
+        elif item.get("src") == "android":
+            self.gb_dismiss(item)
+        self.store.remove(nid)
+
+    def action(self, nid, positive):
+        item = self.store.get(nid) if nid != "call" else None
+        if nid in ("call", "gb:call") or (item and item.get("category") == "call"):
+            call = getattr(self, "call_state", None)
+            if call and call.get("src") == "android":
+                self.gb_send({"t": "call", "n": "ACCEPT" if positive else "REJECT"})
+            elif call and call.get("src") == "ios":
+                s = self.ios_session()
+                if s:
+                    s.action(call["uid"], positive)
+            self.on_call(None)
+            return
+        if not item:
+            return
+        if item.get("src") == "ios":
+            s = self.ios_session()
+            if s:
+                s.action(item["uid"], positive)
+            self.store.remove(nid)
+        elif item.get("src") == "android":
+            if positive:
+                self.gb_send({"t": "notify", "id": int(nid.split(":")[1]), "n": "OPEN"})
+            else:
+                self.gb_dismiss(item)
+            self.store.remove(nid)
+
+    def music(self, cmd):
+        if self.gb_dev and cmd in ("play", "pause", "playpause", "next", "previous", "volumeup", "volumedown"):
+            self.gb_send({"t": "music", "n": cmd})
+
+    def ios_session(self):
+        for s in self.ios.values():
+            if s.ready:
+                return s
+        return None
+
+    def phone_info(self):
+        s = self.ios_session()
+        if s:
+            return {"connected": True, "kind": "ios", "name": self.dev_name(s.path)}
+        if self.gb_dev:
+            return {"connected": True, "kind": "android", "name": self.dev_name(self.gb_dev)}
+        return {"connected": False, "kind": "", "name": ""}
+
+
+class AncsSession:
+    """One connected iPhone: subscribes to ANCS and fetches attributes one
+    request at a time (ANCS answers on the Data Source in order)."""
+
+    def __init__(self, link, path, svc):
+        self.link = link
+        self.path = path
+        self.svc = svc
+        self.ns = link.gatt_char(svc, ANCS_NS)
+        self.cp = link.gatt_char(svc, ANCS_CP)
+        self.ds = link.gatt_char(svc, ANCS_DS)
+        self.ready = False
+        self.closed = False
+        self.queue = asyncio.Queue()
+        self.pending = None           # AncsResponse being filled
+        self.pending_done = None
+        self.preexisting = []         # UIDs of notifications already on the phone
+        self.pre_timer = None
+        self.worker = None
+
+    async def start(self):
+        link = self.link
+        name = link.dev_name(self.path)
+        if not (self.ns and self.cp and self.ds):
+            log.warning("%s: ANCS characteristics missing", name)
+            link.ios.pop(self.path, None)
+            return
+        # The phone's notifications belong to this session from now on.
+        link.store.remove_where(lambda i: i.get("src") == "ios")
+        try:
+            await link.call(self.ds, "org.bluez.GattCharacteristic1", "StartNotify")
+            await link.call(self.ns, "org.bluez.GattCharacteristic1", "StartNotify")
+        except link.dbus.DBusError as e:
+            log.warning("%s: ANCS subscribe failed: %s", name, e)
+            link.ios.pop(self.path, None)
+            return
+        self.ready = True
+        log.info("ANCS session with %s", name)
+        link.remember(self.path, "ios")
+        if link.pairing == "ios":
+            link.set_pairing("")
+        self.worker = link.loop.create_task(self.work())
+        link.loop.create_task(self.read_time())
+        await link.advertise()
+
+    def close(self):
+        self.closed = True
+        self.ready = False
+        if self.worker:
+            self.worker.cancel()
+        if self.pre_timer:
+            self.pre_timer.cancel()
+
+    async def read_time(self):
+        link = self.link
+        svc = link.gatt_service(self.path, CTS_SERVICE)
+        if not svc:
+            return
+        cur = link.gatt_char(svc, CTS_CURRENT)
+        info = link.gatt_char(svc, CTS_LOCALINFO)
+        try:
+            c = (await link.call(cur, "org.bluez.GattCharacteristic1", "ReadValue", "a{sv}", {}))[0]
+            li = None
+            if info:
+                li = (await link.call(info, "org.bluez.GattCharacteristic1", "ReadValue", "a{sv}", {}))[0]
+            set_clock(cts_to_utc(c, li), "iPhone")
+        except link.dbus.DBusError as e:
+            log.info("could not read the iPhone's time: %s", e)
+
+    def on_value(self, char, data):
+        if self.closed:
+            return
+        if char == self.ns:
+            ev = ancs_parse_ns(data)
+            if ev:
+                self.on_ns(ev)
+        elif char == self.ds:
+            if self.pending is None:
+                log.debug("ANCS data with nothing pending, dropped")
+                return
+            try:
+                done = self.pending.feed(data)
+            except ValueError as e:
+                log.warning("ANCS data: %s", e)
+                done = True
+            if done and self.pending_done and not self.pending_done.done():
+                self.pending_done.set_result(self.pending)
+
+    def on_ns(self, ev):
+        uid = ev["uid"]
+        nid = "ios:%d" % uid
+        if ev["event"] == EV_REMOVED:
+            self.link.store.remove(nid)
+            call = getattr(self.link, "call_state", None)
+            if call and call.get("uid") == uid:
+                self.link.on_call(None)
+            return
+        if ev["flags"] & FL_PREEXISTING:
+            # Read the newest ones once the burst on connect is over.
+            self.preexisting.append(ev)
+            if self.pre_timer:
+                self.pre_timer.cancel()
+            self.pre_timer = self.link.loop.call_later(1.0, self.flush_preexisting)
+            return
+        self.queue.put_nowait(ev)
+
+    def flush_preexisting(self):
+        self.pre_timer = None
+        evs = sorted(self.preexisting, key=lambda e: e["uid"], reverse=True)[:PREEXISTING_FETCH]
+        self.preexisting = []
+        for ev in evs:
+            self.queue.put_nowait(ev)
+
+    async def request(self, cmd_bytes, resp):
+        link = self.link
+        self.pending = resp
+        self.pending_done = link.loop.create_future()
+        try:
+            await link.call(self.cp, "org.bluez.GattCharacteristic1", "WriteValue", "aya{sv}",
+                            list(cmd_bytes), {"type": ("s", "request")})
+            return await asyncio.wait_for(self.pending_done, 5)
+        except link.dbus.DBusError as e:
+            log.info("ANCS request failed: %s", e)
+            return None
+        except asyncio.TimeoutError:
+            log.info("ANCS request timed out")
+            return None
+        finally:
+            self.pending = None
+            self.pending_done = None
+
+    async def work(self):
+        while not self.closed:
+            ev = await self.queue.get()
+            try:
+                await self.fetch(ev)
+            except Exception:
+                log.exception("ANCS fetch")
+
+    async def fetch(self, ev):
+        uid = ev["uid"]
+        resp = await self.request(ancs_cmd_notif_attrs(uid),
+                                  AncsResponse(CMD_NOTIF_ATTRS, [a for a, _ in NOTIF_ATTRS]))
+        if not resp or self.closed:
+            return
+        a = resp.attrs
+        app_id = a.get(A_APPID, "")
+        app = await self.app_name(app_id)
+        cat = CATEGORIES[ev["category"]] if ev["category"] < len(CATEGORIES) else "other"
+        pre = bool(ev["flags"] & FL_PREEXISTING)
+        when = ancs_date(a.get(A_DATE, "")) if pre else None
+        item = {
+            "id": "ios:%d" % uid, "uid": uid, "src": "ios",
+            "app": app, "appId": app_id,
+            "title": a.get(A_TITLE, ""), "subtitle": a.get(A_SUBTITLE, ""),
+            "body": a.get(A_MESSAGE, ""),
+            "time": when or time.time(), "category": cat,
+            "pos": a.get(A_POS, "") if ev["flags"] & FL_POSITIVE else "",
+            "neg": a.get(A_NEG, "") if ev["flags"] & FL_NEGATIVE else "",
+            "important": bool(ev["flags"] & FL_IMPORTANT),
+        }
+        if pre:
+            item["read"] = True
+        if cat == "call" and not pre:
+            self.link.on_call({"src": "ios", "state": "incoming", "uid": uid, "id": item["id"],
+                               "name": item["title"], "number": item["subtitle"],
+                               "pos": item["pos"] or "Answer", "neg": item["neg"] or "Decline"})
+            return
+        announce = not pre and not (ev["flags"] & FL_SILENT) and ev["event"] == EV_ADDED
+        self.link.store.put(item, announce=announce)
+
+    async def app_name(self, app_id):
+        if not app_id:
+            return ""
+        names = self.link.app_names
+        if app_id in names:
+            return names[app_id]
+        resp = await self.request(ancs_cmd_app_attrs(app_id), AncsResponse(CMD_APP_ATTRS, [0]))
+        name = (resp.attrs.get(0) if resp else "") or app_id.rsplit(".", 1)[-1]
+        names[app_id] = name
+        self.link.save_app_names()
+        return name
+
+    def action(self, uid, positive):
+        async def go():
+            try:
+                await self.link.call(self.cp, "org.bluez.GattCharacteristic1", "WriteValue", "aya{sv}",
+                                     list(ancs_cmd_action(uid, positive)), {"type": ("s", "request")})
+            except self.link.dbus.DBusError as e:
+                log.info("ANCS action failed: %s", e)
+        self.link.loop.create_task(go())
+
+# ---------------------------------------------------------------------------
+# The shell's socket
+
+class Hub:
+    """Unix socket for the shell. Lines of JSON.
+
+    To the shell:
+      {"t":"state","bt":bool,"adv":"" or error,"pairing":"","phone":{...},
+       "known":[{name,kind,address}],"music":{...},"note":""}
+      {"t":"list","items":[notification, ...]}         newest first
+      {"t":"posted","item":notification}                 pop a banner
+      {"t":"call","call":{name,number,pos,neg,...} or null}
+    From the shell:
+      {"t":"dismiss","id":..}  {"t":"action","id":..,"positive":bool}
+      {"t":"clear"}  {"t":"read"}  {"t":"pair","kind":"ios"|"android"|""}
+      {"t":"forget"}  {"t":"music","cmd":"next"}
+    """
+
+    def __init__(self, store, link, loop):
+        self.store = store
+        self.link = link
+        self.loop = loop
+        self.clients = set()
+        self.note = ""
+        store.listeners.append(self.on_store)
+        link.on_state = self.on_state
+        link.on_call = self.on_call
+        link.call_state = None
+
+    async def start(self):
+        try:
+            os.unlink(SOCK_PATH)
+        except FileNotFoundError:
+            pass
+        self.server = await asyncio.start_unix_server(self.client, path=SOCK_PATH)
+        os.chmod(SOCK_PATH, 0o666)
+        log.info("listening on %s", SOCK_PATH)
+
+    def state(self):
+        link = self.link
+        return {"t": "state", "bt": bool(link.adapter and link.adapter_powered),
+                "adv": link.adv_error, "advertising": link.adv_registered,
+                "pairing": link.pairing, "phone": link.phone_info(),
+                "known": link.known, "music": link.phone_music, "note": self.note}
+
+    def send_all(self, obj):
+        data = (json.dumps(obj, ensure_ascii=False) + "\n").encode()
+        for w in list(self.clients):
+            try:
+                w.write(data)
+            except (ConnectionError, RuntimeError):
+                self.clients.discard(w)
+
+    def on_state(self, note=None):
+        if note is not None:
+            self.note = note
+        elif self.link.phone_connected():
+            self.note = ""
+        self.send_all(self.state())
+
+    def on_store(self, posted):
+        self.send_all({"t": "list", "items": self.store.items})
+        if posted:
+            self.send_all({"t": "posted", "item": posted})
+
+    def on_call(self, call):
+        self.link.call_state = call
+        self.send_all({"t": "call", "call": call})
+
+    async def client(self, reader, writer):
+        self.clients.add(writer)
+        try:
+            for obj in (self.state(), {"t": "list", "items": self.store.items},
+                        {"t": "call", "call": self.link.call_state}):
+                writer.write((json.dumps(obj, ensure_ascii=False) + "\n").encode())
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                try:
+                    cmd = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(cmd, dict):
+                    await self.command(cmd)
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            self.clients.discard(writer)
+            writer.close()
+
+    async def command(self, c):
+        t = c.get("t")
+        link = self.link
+        log.debug("shell: %s", c)
+        if t == "dismiss":
+            link.dismiss(str(c.get("id", "")))
+        elif t == "action":
+            link.action(str(c.get("id", "")), bool(c.get("positive")))
+        elif t == "clear":
+            for i in list(self.store.items):
+                link.dismiss(i["id"])
+        elif t == "read":
+            self.store.mark_read()
+        elif t == "pair":
+            link.set_pairing(str(c.get("kind", "")))
+        elif t == "forget":
+            await link.forget()
+        elif t == "music":
+            link.music(str(c.get("cmd", "")))
+
+# ---------------------------------------------------------------------------
+
+def setup_logging():
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG if os.environ.get("RGEDC_PHONE_DEBUG") else logging.INFO)
+    h = logging.StreamHandler(sys.stderr)
+    h.setFormatter(fmt)
+    root.addHandler(h)
+    try:
+        fh = logging.FileHandler(LOG_FILE)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except OSError:
+        pass
+
+
+async def main():
+    setup_logging()
+    log.info("rgedc-phone %s starting", VERSION)
+    loop = asyncio.get_running_loop()
+    store = Store(os.path.join(CACHE_DIR, "notifications.json"))
+    link = Link(store, loop)
+    hub = Hub(store, link, loop)
+    await hub.start()
+    await link.start()
+    stop = loop.create_future()
+    for s in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(s, lambda: stop.done() or stop.set_result(None))
+    await stop
+    log.info("stopping")
+    try:
+        if link.adv_registered:
+            await link.call(link.adapter, "org.bluez.LEAdvertisingManager1",
+                            "UnregisterAdvertisement", "o", link.ADV_PATH, timeout=2000)
+    except Exception:
+        pass
+    try:
+        os.unlink(SOCK_PATH)
+    except OSError:
+        pass
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

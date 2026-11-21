@@ -1,0 +1,229 @@
+From: RG EDC
+Subject: [PATCH] app: return to the RG EDC shell; open on a shelf or game
+
+Upstream slot (GPL-3.0-or-later, https://github.com/slot-cfw/slot) is a
+whole-device frontend: in host mode it can only quit through the power menu
+(PowerOff ends in SimPlatform::poweroff(), exit 0), which on the RG Rotate is
+reached through a power key that ROCKNIX keeps for suspend. RG EDC runs slot
+from its own shell, so:
+
+- Add "Back to RG EDC" as the last row of the main menu (Menu button). It
+  flushes the resume state and saves like an eject, then takes the existing
+  power-off path, which exits with status 0. In host mode the power-off
+  screen reads "Back to RG EDC" instead of "Powering Down".
+- SLOT_SHELF=gb|gbc|gba|recents|favorites opens slot on that shelf (rack
+  keys as slot stores them), overriding the remembered shelf.
+- SLOT_INSERT=<rom path or file name> selects that cart (by file stem, on
+  the SLOT_SHELF shelf if given, otherwise any system shelf) and inserts it
+  once the shelf is up, for "resume last game" from the shell.
+- SLOT_BACK_EXITS=1 makes B on the shelf return to the shell too.
+
+This patch is distributed under the same GPL-3.0-or-later licence.
+---
+--- a/crates/slot-ui/src/quick_menu.rs
++++ b/crates/slot-ui/src/quick_menu.rs
+@@ -146,10 +146,12 @@
+     Overlay,
+     BatteryDisplay,
+     System,
++    // RG EDC: quit slot and return to the RG EDC shell.
++    Exit,
+ }
+ 
+ impl QuickRow {
+-    pub const ALL: [QuickRow; 135 + cfg!(feature = "nds") as usize] = [
++    pub const ALL: [QuickRow; 136 + cfg!(feature = "nds") as usize] = [
+         QuickRow::FastForward,
+         QuickRow::FastForwardSound,
+         QuickRow::Screen,
+@@ -287,15 +289,17 @@
+         QuickRow::Overlay,
+         QuickRow::BatteryDisplay,
+         QuickRow::System,
++        QuickRow::Exit,
+     ];
+ 
+-    pub const MAIN: [QuickRow; 6] = [
++    pub const MAIN: [QuickRow; 7] = [
+         QuickRow::General,
+         QuickRow::Game,
+         QuickRow::Controls,
+         QuickRow::Screen,
+         QuickRow::Network,
+         QuickRow::System,
++        QuickRow::Exit,
+     ];
+ 
+     pub const GENERAL: [QuickRow; 8] = [
+@@ -815,6 +819,7 @@
+             | QuickRow::GbOverlay
+             | QuickRow::GbcOverlay
+             | QuickRow::Overlay => "Overlay",
++            QuickRow::Exit => "Back to RG EDC",
+         }
+     }
+ 
+@@ -825,7 +830,8 @@
+         }
+         matches!(
+             self,
+-            QuickRow::DateTime
++            QuickRow::Exit
++                | QuickRow::DateTime
+                 | QuickRow::FetchArt
+                 | QuickRow::About
+                 | QuickRow::Screen
+--- a/crates/slot/src/app.rs
++++ b/crates/slot/src/app.rs
+@@ -824,6 +824,8 @@
+     battery: Option<Battery>,
+     last_led: Option<LedState>,
+     powering_off: bool,
++    /// RG EDC: insert the cart picked by SLOT_INSERT once on the shelf.
++    rgedc_insert: bool,
+     radio: Box<dyn RadioJobs>,
+     update_jobs: Box<dyn UpdateJobs>,
+     art_jobs: Box<dyn ArtJobs>,
+@@ -1359,6 +1361,7 @@
+             battery: None,
+             last_led: None,
+             powering_off: false,
++            rgedc_insert: false,
+         }
+     }
+ 
+@@ -1400,6 +1403,28 @@
+         } else if !app.shelves[RECENTS_AT].1.carts.is_empty() {
+             app.shelf_at = RECENTS_AT;
+         }
++        // RG EDC: SLOT_SHELF / SLOT_INSERT pick the shelf (and cart) to open on.
++        if let Some(want) = crate::rgedc::shelf() {
++            if let Some(at) = (0..app.shelves.len()).find(|&at| app.rack_key(app.shelves[at].0) == want) {
++                app.shelf_at = at;
++            }
++        }
++        if let Some(stem) = crate::rgedc::insert_stem() {
++            let found = (0..app.shelves.len()).find_map(|at| {
++                let rack = app.shelves[at].0;
++                let wanted_here = crate::rgedc::shelf().is_none_or(|w| app.rack_key(rack) == w);
++                (matches!(rack, Rack::Of(_)) && wanted_here)
++                    .then(|| app.shelves[at].1.carts.iter().position(|c| c.stem == stem).map(|i| (at, i)))
++                    .flatten()
++            });
++            if let Some((at, i)) = found {
++                app.shelf_at = at;
++                app.shelves[at].1.select(i);
++                app.rgedc_insert = true;
++            } else {
++                eprintln!("slot: SLOT_INSERT: no cart named {stem:?}");
++            }
++        }
+         let hidden = matches!(
+             (app.state.shelf_mode, app.shelves[app.shelf_at].0),
+             (ShelfMode::Collections, Rack::Of(_))
+@@ -2971,6 +2996,7 @@
+             | QuickRow::CheckUpdates
+             | QuickRow::Server
+             | QuickRow::About
++            | QuickRow::Exit
+             | QuickRow::Screen
+             | QuickRow::Game
+             | QuickRow::Wallpaper
+@@ -6255,6 +6281,8 @@
+                 Action::Insert if !self.unwrap_seated() => {
+                     self.insert(!self.state.resume_insert);
+                 }
++                // RG EDC: SLOT_BACK_EXITS=1 makes B on the shelf return to the shell.
++                Action::GbaDown(Btn::B) if crate::rgedc::back_exits() => self.exit_to_shell(),
+                 _ => {}
+             },
+             Phase::Inserting { .. } if action == Action::Eject => self.eject(),
+@@ -6518,6 +6546,9 @@
+                 self.phase = clock_screen(self.utc_secs(), &self.state, self.has_saved(), true);
+             }
+             QuickRow::About => self.phase = Phase::About,
++            // RG EDC: save like an eject, then leave slot (the host platform's
++            // power-off exits the process with status 0).
++            QuickRow::Exit => self.exit_to_shell(),
+             QuickRow::FetchArt => self.open_fetch_missing_art(),
+             #[cfg(feature = "nds")]
+             QuickRow::FetchBoxArt => self.open_fetch_box_art(),
+@@ -6921,6 +6952,7 @@
+             | QuickRow::KidShelf
+             | QuickRow::DateTime
+             | QuickRow::About
++            | QuickRow::Exit
+             | QuickRow::Screen
+             | QuickRow::Game
+             | QuickRow::Resume
+@@ -7315,6 +7347,10 @@
+     }
+ 
+     pub fn update(&mut self, dt: f32) {
++        if self.rgedc_insert && matches!(self.phase, Phase::Shelf) && !self.unwrap_seated() {
++            self.rgedc_insert = false;
++            self.insert(!self.state.resume_insert);
++        }
+         self.clock += dt as f64 * 1000.0;
+         if std::mem::take(&mut self.kid_toast_due) {
+             self.hud.toast(Toast::KidUnlocked, self.now());
+@@ -15356,6 +15392,12 @@
+         }
+     }
+ 
++    /// RG EDC: quit slot back to the RG EDC shell, saving first.
++    fn exit_to_shell(&mut self) {
++        self.flush_resume();
++        self.begin_power_off();
++    }
++
+     fn begin_power_off(&mut self) {
+         self.abandon_server();
+         self.close_studio();
+--- a/crates/slot/src/frontend.rs
++++ b/crates/slot/src/frontend.rs
+@@ -1704,6 +1704,8 @@
+                 .map(|c| {
+                     menu_face(match c {
+                         PowerChoice::Restart => "Restarting",
++                        // RG EDC: in host mode power-off returns to the shell.
++                        PowerChoice::PowerOff if cfg!(feature = "host") => "Back to RG EDC",
+                         PowerChoice::PowerOff => "Powering Down",
+                         PowerChoice::Repair => "Repairing SD Card",
+                     })
+--- a/crates/slot/src/lib.rs
++++ b/crates/slot/src/lib.rs
+@@ -9,6 +9,7 @@
+ pub mod art;
+ pub mod audio;
+ pub mod perf;
++pub mod rgedc;
+ pub mod baseos;
+ pub mod bezel;
+ pub mod ble;
+--- /dev/null
++++ b/crates/slot/src/rgedc.rs
+@@ -0,0 +1,23 @@
++//! RG EDC: hooks that let the RG EDC shell launch slot onto a given shelf or
++//! game and get control back.
++//!
++//! - SLOT_SHELF=gb|gbc|gba|recents|favorites opens slot on that shelf.
++//! - SLOT_INSERT=<rom path or file name> selects that game and inserts it.
++//! - SLOT_BACK_EXITS=1 makes B on the shelf quit back to the shell.
++use std::path::Path;
++
++pub fn shelf() -> Option<String> {
++    let v = std::env::var("SLOT_SHELF").ok()?;
++    let v = v.trim().to_ascii_lowercase();
++    (!v.is_empty()).then_some(v)
++}
++
++pub fn insert_stem() -> Option<String> {
++    let v = std::env::var("SLOT_INSERT").ok()?;
++    let stem = Path::new(v.trim()).file_stem()?.to_string_lossy().into_owned();
++    (!stem.is_empty()).then_some(stem)
++}
++
++pub fn back_exits() -> bool {
++    std::env::var_os("SLOT_BACK_EXITS").is_some_and(|v| v != "0")
++}

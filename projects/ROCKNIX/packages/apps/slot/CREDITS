@@ -1,0 +1,19 @@
+slot. on RG EDC
+===============
+
+slot. is a cartridge-shelf frontend for Game Boy, Game Boy Color and Game Boy
+Advance, built here from https://github.com/slot-cfw/slot and distributed
+under the GNU General Public License v3.0 or later (see LICENSE).
+
+- slot. by Brandon Kowalski (https://github.com/BrandonKowalski/slot,
+  https://slot-cfw.fyi).
+- Cartridge, board and shelf artwork by Markus
+  (https://github.com/MarkusMaribu), shipped in slot.'s repository.
+- slot. for Android by Baggio94 (https://github.com/Baggio94/slot-for-android)
+  inspired its support for square screens such as the Anbernic RG Rotate.
+- Emulation cores: mGBA, gpSP and Gambatte (see their licence files here).
+
+RG EDC carries small patches for the RG Rotate (square 720x720 game view,
+OpenGL ES context, PipeWire audio buffering). They are in the RG EDC source
+tree under projects/ROCKNIX/packages/apps/slot/patches and are distributed
+under the same GPL-3.0-or-later licence.

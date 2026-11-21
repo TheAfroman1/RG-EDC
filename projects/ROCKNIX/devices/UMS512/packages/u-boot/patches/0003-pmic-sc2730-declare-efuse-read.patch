@@ -1,0 +1,16 @@
+Declare sprd_pmic_efuse_read in pmic_sc2730.c; GCC 14+ rejects implicit
+function declarations.
+
+diff --git a/drivers/power/pmic/pmic_sc2730.c b/drivers/power/pmic/pmic_sc2730.c
+index 4983fe9..87b859e 100755
+--- a/drivers/power/pmic/pmic_sc2730.c
++++ b/drivers/power/pmic/pmic_sc2730.c
+@@ -9,6 +9,8 @@
+ #include <asm/arch/sprd_reg.h>
+ #include <sprd_adc.h>
+ 
++extern u32 sprd_pmic_efuse_read(int blk_index);
++
+ #define GENMASK(h, l) \
+ 	(((~0UL) << (l)) & (~0UL >> (BITS_PER_LONG - 1 - (h))))
+ 

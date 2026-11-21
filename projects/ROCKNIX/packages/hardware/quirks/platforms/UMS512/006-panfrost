@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026-present RG EDC
+
+cat <<EOF >/storage/.config/profile.d/006-panfrost
+# Mali-G52 MP2 (Bifrost) on panfrost
+PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1
+EOF

@@ -1,0 +1,29 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026-present RG EDC
+#
+# Start the RG EDC shell inside sway (run by start_rgedc.sh from essway.service,
+# or by hand over SSH). A copy of the QML in /storage/.config/rgedc/qml, if
+# present, is used instead of the built-in one, for tweaking on the device.
+
+. /etc/profile
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/var/run/0-runtime-dir}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+export QT_QPA_PLATFORM=wayland
+export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+export QT_MEDIA_BACKEND=ffmpeg
+# Music dropped out every couple of seconds with Qt's default (small) PulseAudio
+# buffer against our pinned 1280-frame PipeWire quantum. Ask for more. The
+# shell clears this again for the games and apps it starts.
+export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-120}"
+# Games and EmulationStation started from the shell expect what ES sets.
+export SDL_AUDIODRIVER=pulseaudio
+
+if [ -f /storage/.config/rgedc/qml/Main.qml ]; then
+  export RGEDC_QML=/storage/.config/rgedc/qml
+fi
+
+mkdir -p /storage/.config/rgedc /storage/music
+
+exec /usr/bin/rgedc-shell.bin "$@" >>/var/log/rgedc-shell.log 2>&1

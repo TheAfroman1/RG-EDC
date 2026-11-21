@@ -435,11 +435,21 @@ set +e
       ;;
       (${FUNCTION_LID_CLOSE_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_LID_CLOSE_EVENT}: Close"
-        /usr/bin/rocknix-fake-suspend lid close &
+        # RG EDC: the shell sets lid-awake while music plays, and shows the
+        # visualizer on the flipped screen instead of sleeping.
+        if [ -e /run/rgedc/lid-awake ]; then
+          touch /run/rgedc/lid-skipped
+        else
+          /usr/bin/rocknix-fake-suspend lid close &
+        fi
       ;;
       (${FUNCTION_LID_OPEN_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_LID_OPEN_EVENT}: Open"
-        /usr/bin/rocknix-fake-suspend lid open &
+        if [ -e /run/rgedc/lid-skipped ]; then
+          rm -f /run/rgedc/lid-skipped
+        else
+          /usr/bin/rocknix-fake-suspend lid open &
+        fi
       ;;
     esac
 
