@@ -598,6 +598,7 @@ class Link:
         self.gb_notifying = False
         self.gb_last = 0.0
         self.phone_music = {}
+        self.canned = self.load_canned()
         self.known = self.load_known()
         self.app_names = self.load_app_names()
         self.on_state = lambda note=None: None
@@ -636,6 +637,21 @@ class Link:
         self.known.append({"address": addr, "name": name, "kind": kind})
         self.save_known()
         log.info("remembered %s phone %s (%s)", kind, name, addr)
+
+    def load_canned(self):
+        try:
+            with open(os.path.join(STATE_DIR, "replies.json")) as f:
+                return [str(r) for r in json.load(f) if r]
+        except (OSError, ValueError, TypeError):
+            return []
+
+    def save_canned(self):
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(os.path.join(STATE_DIR, "replies.json"), "w") as f:
+                json.dump(self.canned, f, ensure_ascii=False)
+        except OSError as e:
+            log.warning("could not save replies.json: %s", e)
 
     def load_app_names(self):
         try:
@@ -1036,7 +1052,8 @@ class Link:
             self.store.put({"id": nid, "src": "android", "app": app, "appId": app,
                             "title": title, "subtitle": subject, "body": body,
                             "time": time.time(), "category": "other",
-                            "pos": "", "neg": "Dismiss"}, announce=True)
+                            "pos": "", "neg": "Dismiss", "reply": bool(p.get("reply"))},
+                           announce=True)
         elif t == "notify-":
             self.store.remove("gb:%s" % p.get("id"))
         elif t == "call":
@@ -1047,6 +1064,11 @@ class Link:
                               "number": str(p.get("number") or ""), "id": "gb:call"})
             else:
                 self.on_call(None)
+        elif t == "canned_responses_sync":
+            self.canned = [latin1_to_text(str(r.get("text", ""))) for r in p.get("d", [])
+                           if isinstance(r, dict) and r.get("text")]
+            self.save_canned()
+            self.on_state()
         elif t in ("musicinfo", "musicstate"):
             self.phone_music.update({k: v for k, v in p.items() if k != "t"})
             self.on_state()
@@ -1112,6 +1134,20 @@ class Link:
             else:
                 self.gb_dismiss(item)
             self.store.remove(nid)
+
+    def reply(self, nid, text):
+        """Only Gadgetbridge can reply; ANCS has no reply action for accessories."""
+        item = self.store.get(nid)
+        if not item or not item.get("reply") or not self.gb_dev or not text:
+            return False
+        try:
+            num = int(nid.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return False
+        self.gb_send({"t": "notify", "id": num, "n": "REPLY", "msg": text})
+        log.info("replied to %s", nid)
+        self.store.remove(nid)
+        return True
 
     def music(self, cmd):
         if self.gb_dev and cmd in ("play", "pause", "playpause", "next", "previous", "volumeup", "volumedown"):
@@ -1339,7 +1375,7 @@ class Hub:
     From the shell:
       {"t":"dismiss","id":..}  {"t":"action","id":..,"positive":bool}
       {"t":"clear"}  {"t":"read"}  {"t":"pair","kind":"ios"|"android"|""}
-      {"t":"forget"}  {"t":"music","cmd":"next"}
+      {"t":"forget"}  {"t":"music","cmd":"next"}  {"t":"reply","id":..,"text":..}
     """
 
     def __init__(self, store, link, loop):
@@ -1367,7 +1403,8 @@ class Hub:
         return {"t": "state", "bt": bool(link.adapter and link.adapter_powered),
                 "adv": link.adv_error, "advertising": link.adv_registered,
                 "pairing": link.pairing, "phone": link.phone_info(),
-                "known": link.known, "music": link.phone_music, "note": self.note}
+                "known": link.known, "music": link.phone_music, "note": self.note,
+                "canned": link.canned}
 
     def send_all(self, obj):
         data = (json.dumps(obj, ensure_ascii=False) + "\n").encode()
@@ -1432,6 +1469,9 @@ class Hub:
             link.set_pairing(str(c.get("kind", "")))
         elif t == "forget":
             await link.forget()
+        elif t == "reply":
+            ok = link.reply(str(c.get("id", "")), str(c.get("text", ""))[:500])
+            self.send_all({"t": "replied", "id": c.get("id"), "ok": ok})
         elif t == "music":
             link.music(str(c.get("cmd", "")))
 

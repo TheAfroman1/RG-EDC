@@ -22,6 +22,8 @@ class Phone : public QObject {
   Q_PROPERTY(QString error READ error NOTIFY stateChanged)
   Q_PROPERTY(QVariantList known READ known NOTIFY stateChanged)
   Q_PROPERTY(QVariantMap music READ music NOTIFY stateChanged)
+  // Quick replies set up in Gadgetbridge (Android).
+  Q_PROPERTY(QStringList canned READ canned NOTIFY stateChanged)
   Q_PROPERTY(QVariantList notifications READ notifications NOTIFY notificationsChanged)
   Q_PROPERTY(int count READ count NOTIFY notificationsChanged)
   Q_PROPERTY(int unread READ unread NOTIFY notificationsChanged)
@@ -41,6 +43,7 @@ public:
   QString error() const { return m_state.value("adv").toString(); }
   QVariantList known() const { return m_state.value("known").toList(); }
   QVariantMap music() const { return m_state.value("music").toMap(); }
+  QStringList canned() const { return m_state.value("canned").toStringList(); }
   QVariantList notifications() const { return m_items; }
   int count() const { return m_items.size(); }
   int unread() const;
@@ -56,6 +59,8 @@ public:
   Q_INVOKABLE void stopPairing() { startPairing(QString()); }
   Q_INVOKABLE void forget();
   Q_INVOKABLE void musicCommand(const QString &cmd);
+  // Android only: ANCS gives accessories no way to reply.
+  Q_INVOKABLE void reply(const QString &id, const QString &text);
 
 signals:
   void stateChanged();
@@ -63,6 +68,7 @@ signals:
   void callChanged();
   // A new notification worth a banner.
   void posted(const QVariantMap &item);
+  void replied(const QString &id, bool ok);
 
 private:
   void connectNow();

@@ -65,6 +65,8 @@ void Phone::onLine(const QByteArray &line) {
     emit notificationsChanged();
   } else if (t == "posted") {
     emit posted(m.value("item").toMap());
+  } else if (t == "replied") {
+    emit replied(m.value("id").toString(), m.value("ok").toBool());
   } else if (t == "call") {
     m_call = m.value("call").toMap();
     emit callChanged();
@@ -95,3 +97,6 @@ void Phone::markAllRead() {
 void Phone::startPairing(const QString &kind) { send({{"t", "pair"}, {"kind", kind}}); }
 void Phone::forget() { send({{"t", "forget"}}); }
 void Phone::musicCommand(const QString &cmd) { send({{"t", "music"}, {"cmd", cmd}}); }
+void Phone::reply(const QString &id, const QString &text) {
+  send({{"t", "reply"}, {"id", id}, {"text", text}});
+}
