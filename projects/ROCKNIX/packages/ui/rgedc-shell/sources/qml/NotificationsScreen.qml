@@ -4,8 +4,8 @@ import QtQuick
 import "."
 import RgEdc 1.0
 
-// Phone notifications, newest first. X clears one (on the phone too), Y clears
-// all, A opens the selected one in full.
+// Phone notifications, newest first. A opens one, X clears it (on the phone
+// too), Y replies (Android), Select clears all.
 Item {
   id: ns
   width: 720; height: 720
@@ -169,18 +169,41 @@ Item {
 
   Hints {
     anchors.bottom: parent.bottom
-    model: ns.confirmAll ? ["*Y AGAIN TO CLEAR ALL", "B CANCEL"]
-         : ns.expanded ? ["↑↓ SCROLL", "X CLEAR", "B BACK"]
-         : ns.items.length ? ["↑↓ MOVE", "A OPEN", "X CLEAR", "Y CLEAR ALL", "B HOME"]
+    model: ns.confirmAll ? ["*SELECT AGAIN TO CLEAR ALL", "B CANCEL"]
+         : ns.expanded ? ["↑↓ SCROLL"].concat(ns.canReply ? ["*Y REPLY"] : []).concat(["X CLEAR", "B BACK"])
+         : ns.items.length ? ["↑↓ MOVE", "A OPEN"].concat(ns.canReply ? ["*Y REPLY"] : []).concat(["X CLEAR", "SELECT CLEAR ALL"])
          : ["B HOME"]
   }
 
+  ReplySheet { id: reply; z: 5; onDone: ns.expanded = false }
+  Connections {
+    target: Phone
+    function onReplied(id, ok) { ns.toast = ok ? "Reply sent" : "Couldn't send the reply"; toastTimer.restart() }
+  }
+  property string toast: ""
+  Timer { id: toastTimer; interval: 2500; onTriggered: ns.toast = "" }
+  Rectangle {
+    z: 6
+    visible: opacity > 0
+    opacity: ns.toast !== "" ? 1 : 0
+    Behavior on opacity { NumberAnimation { duration: Theme.med } }
+    anchors.horizontalCenter: parent.horizontalCenter
+    y: 610; width: toastText.width + 48; height: 44; radius: 22
+    color: "#1a1b1e"; border.color: Theme.line
+    Text { id: toastText; anchors.centerIn: parent; text: ns.toast; font.family: Theme.sans; font.pixelSize: 17; color: Theme.creamDim }
+  }
+
+  // Replies go through Gadgetbridge; iPhones don't let accessories reply.
+  readonly property bool canReply: cur !== null && cur.reply === true && Phone.connected && Phone.kind === "android"
+
   function handle(b) {
+    if (reply.open) return reply.handle(b)
     if (confirmAll) {
       confirmAll = false
-      if (b === "y") Phone.clearAll()
+      if (b === "select") Phone.clearAll()
       return true
     }
+    if (b === "y" && canReply) { reply.show(cur); return true }
     if (expanded) {
       if (b === "up") { fl.contentY = Math.max(0, fl.contentY - 120); return true }
       if (b === "down") { fl.contentY = Math.min(Math.max(0, fl.contentHeight - fl.height), fl.contentY + 120); return true }
@@ -192,7 +215,7 @@ Item {
     if (b === "down") { sel = Math.min(items.length - 1, sel + 1); return true }
     if (b === "a" && cur) { expanded = true; fl.contentY = 0; return true }
     if (b === "x" && cur) { Phone.dismiss(cur.id); return true }
-    if (b === "y" && items.length) { confirmAll = true; return true }
+    if (b === "select" && items.length) { confirmAll = true; return true }
     if (b === "b") { Nav.go("home"); return true }
     return false
   }

@@ -232,6 +232,20 @@ class EndToEnd(unittest.TestCase):
         await writer.drain()
         await asyncio.sleep(0.3)
         self.assertIn(b'{"t":"call","n":"ACCEPT"}\r\n', fake.tx)
+
+        # Replies: canned list from the phone, then a reply goes back.
+        await fake.gb_write('\x10GB({"t":"canned_responses_sync","d":[{"text":"On my way"},{"text":"Call you later"}]})\n')
+        await fake.gb_write('\x10GB({"t":"notify","id":1800,"src":"Signal","title":"Bo","body":"hi","reply":true})\n')
+        await asyncio.sleep(0.3)
+        self.assertTrue(store.get("gb:1800")["reply"])
+        writer.write('{"t":"reply","id":"gb:1800","text":"On my way \U0001F697"}\n'.encode())
+        await writer.drain()
+        await asyncio.sleep(0.3)
+        self.assertIn('{"t":"notify","id":1800,"n":"REPLY","msg":"On my way \\ud83d\\ude97"}'.encode(), fake.tx)
+        self.assertIsNone(store.get("gb:1800"))
+        states = [m for m in msgs if m["t"] == "state"]
+        self.assertEqual(states[-1]["canned"], ["On my way", "Call you later"])
+        self.assertTrue([m for m in msgs if m["t"] == "replied"][-1]["ok"])
         states = [m for m in msgs if m["t"] == "state"]
         self.assertEqual(states[-1]["phone"]["kind"], "android")
 

@@ -43,6 +43,12 @@ int main(int argc, char *argv[]) {
   for (const QString &f : QDir(fonts).entryList({"*.ttf", "*.otf"}))
     if (QFontDatabase::addApplicationFont(fonts + "/" + f) < 0)
       qWarning("rgedc-shell: could not load font %s", qPrintable(f));
+  // Emoji in notifications and track names: fall back to the color emoji font.
+  const QString emoji = qEnvironmentVariable("RGEDC_EMOJI_FONT",
+      "/usr/share/fonts/truetype/noto-emoji/NotoColorEmoji.ttf");
+  if (QFileInfo::exists(emoji) && QFontDatabase::addApplicationFont(emoji) >= 0)
+    for (const char *family : {"Archivo", "Archivo Condensed", "IBM Plex Mono"})
+      QFont::insertSubstitution(family, "Noto Color Emoji");
   QFont base("Archivo");
   base.setPixelSize(16);
   app.setFont(base);

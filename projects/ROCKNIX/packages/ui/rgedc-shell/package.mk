@@ -6,7 +6,7 @@ PKG_VERSION="1.0"
 PKG_LICENSE="GPLv2"
 PKG_SITE=""
 PKG_URL=""
-PKG_DEPENDS_TARGET="toolchain qt6 SDL2"
+PKG_DEPENDS_TARGET="toolchain qt6 SDL2 noto-color-emoji"
 PKG_LONGDESC="RG EDC shell: watch faces, music, cartridge shelves and settings for the RG Rotate (Qt Quick)"
 PKG_TOOLCHAIN="cmake"
 
