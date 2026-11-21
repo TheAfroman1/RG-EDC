@@ -223,6 +223,42 @@ void System::setKeepAwakeOnLid(bool on) {
   }
 }
 
+void System::setDimmed(bool on) {
+  if (!m_onDevice || on == m_dimmed) return;
+  if (m_backlight.isEmpty()) {
+    const QDir bl("/sys/class/backlight");
+    const QStringList d = bl.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    if (d.isEmpty()) return;
+    m_backlight = bl.filePath(d.first());
+  }
+  QFile f(m_backlight + "/brightness");
+  if (on) {
+    m_backlightSaved = readLine(m_backlight + "/brightness");
+    const int max = readLine(m_backlight + "/max_brightness").toInt();
+    const int low = qMax(1, max * 6 / 100);
+    if (m_backlightSaved.toInt() <= low) { m_dimmed = true; return; }
+    if (f.open(QIODevice::WriteOnly)) f.write(QByteArray::number(low));
+  } else if (!m_backlightSaved.isEmpty()) {
+    if (f.open(QIODevice::WriteOnly)) f.write(m_backlightSaved.toUtf8());
+  }
+  m_dimmed = on;
+}
+
+void System::sleepNow() {
+  if (!m_onDevice) { qInfo("rgedc-shell: (desktop) sleep"); return; }
+  setDimmed(false);
+  // input_sense skipped the lid-close sleep for us; let the lid-open event
+  // wake the device normally.
+  QFile::remove(QString(kRunDir) + "/lid-skipped");
+  runDetached("/usr/bin/rocknix-fake-suspend", {"lid", "close"});
+}
+
+void System::simulateLid(bool closed) {
+  if (m_onDevice || closed == m_lidClosed) return;
+  m_lidClosed = closed;
+  emit lidClosedChanged();
+}
+
 void System::runDetached(const QString &program, const QStringList &args) {
   QProcess::startDetached(program, args);
 }

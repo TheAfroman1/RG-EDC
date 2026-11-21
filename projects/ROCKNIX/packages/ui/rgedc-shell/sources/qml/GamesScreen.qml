@@ -8,6 +8,7 @@ import RgEdc 1.0
 // played games up front. A inserts the cart into the walnut slot and starts it.
 Item {
   id: games
+  readonly property int dragStep: 120
   width: 720; height: 720
 
   readonly property var shelves: {
@@ -83,6 +84,7 @@ Item {
         required property int index
         readonly property bool on: index === games.shelf
         height: 36; width: tabText.width + 28; radius: 18
+        function tapAction(x, y) { games.moveShelf(index - games.shelf) }
         color: on ? "#e9ebee" : "transparent"
         border.color: on ? "transparent" : Theme.line; border.width: 1
         Text {
@@ -141,6 +143,10 @@ Item {
       required property var modelData
       required property int index
       width: 260; height: lv.height
+      function tapAction(x, y) {
+        if (lv.currentIndex === index) games.handle("a")
+        else lv.currentIndex = index
+      }
       readonly property real dist: (x + width / 2 - lv.contentX - lv.width / 2) / 260
       readonly property real ad: Math.min(Math.abs(dist), 1.5)
       readonly property bool center: index === lv.currentIndex

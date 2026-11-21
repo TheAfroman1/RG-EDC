@@ -8,6 +8,7 @@ Item {
   id: settings
   width: 720; height: 720
   property int sel: 0
+  readonly property int dragStep: 60
   property string confirm: ""
   property bool showAbout: false      // row key waiting for a second A press
   property string pairKind: ""        // pairing guide showing: "ios" or "android"
@@ -21,6 +22,8 @@ Item {
     { key: "watchFace", label: "Watch face", kind: "choice", values: ["analog", "digital", "nixie"], names: ["Analog", "Digital", "Nixie"], value: opt("watchFace", "analog") },
     { key: "nixieSeconds", label: "Nixie shows seconds", kind: "toggle", value: on("nixieSeconds", true) },
     { key: "disc", label: "Music spins a", kind: "choice", values: ["vinyl", "cd"], names: ["Vinyl record", "CD"], value: opt("disc", "vinyl") },
+    { key: "lidClock", label: "Flip shut shows the clock for", kind: "choice", values: ["0", "15", "30", "60", "120", "300"], names: ["No, sleep", "15 s", "30 s", "1 min", "2 min", "5 min"], value: String(opt("lidClock", "60")) },
+    { key: "flipRotation", label: "Flipped screen turns", kind: "choice", values: ["180", "90", "270", "0"], names: ["Upside down", "90° right", "90° left", "Not at all"], value: String(win.flipRotation) },
     { key: "lidVisualizer", label: "Flip shut while playing", kind: "choice", values: ["true", "false"], names: ["Visualizer", "Sleep"], value: String(on("lidVisualizer", true)) },
     { key: "phone", label: "Phone", kind: "info",
       value: !Phone.available ? "Bluetooth off" : Phone.connected ? Phone.name : Phone.known.length ? "Not connected" : "None paired" },
@@ -62,6 +65,12 @@ Item {
       required property int index
       readonly property bool on: index === settings.sel
       width: lv.width; height: 60
+      function tapAction(x, y) {
+        settings.sel = index
+        if (modelData.kind === "level") settings.handle(x < width / 2 ? "left" : "right")
+        else if (modelData.kind === "choice") settings.handle("right")
+        else settings.handle("a")
+      }
       Text {
         x: 24; anchors.verticalCenter: parent.verticalCenter
         text: settings.confirm === modelData.key ? "Press A again to confirm" : modelData.label

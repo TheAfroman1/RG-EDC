@@ -9,6 +9,7 @@ Item {
   id: home
   width: 720; height: 720
   property int sel: 0
+  readonly property int dragStep: 80
 
   readonly property var lastGame: Library.recents.length ? Library.recents[0] : null
   readonly property var items: [
@@ -66,6 +67,7 @@ Item {
         required property int index
         readonly property bool on: index === home.sel
         width: 360; height: 92
+        function tapAction(x, y) { home.sel = index; home.handle("a") }
         Walnut {
           width: parent.on ? 14 : 0; height: 64
           anchors.verticalCenter: parent.verticalCenter

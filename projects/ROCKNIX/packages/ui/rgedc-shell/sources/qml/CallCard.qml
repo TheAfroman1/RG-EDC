@@ -81,6 +81,7 @@ Rectangle {
       delegate: Item {
         required property var modelData
         width: 240; height: 64
+        function tapAction(x, y) { cc.handle(modelData.warm ? "a" : "b") }
         Rectangle {
           anchors.fill: parent; radius: 32
           visible: !modelData.warm

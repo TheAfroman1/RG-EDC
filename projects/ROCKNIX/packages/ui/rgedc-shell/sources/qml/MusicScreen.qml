@@ -199,9 +199,10 @@ Item {
       anchors.verticalCenter: parent ? parent.verticalCenter : undefined
       Text { anchors.centerIn: parent; text: glyph; font.pixelSize: 22; color: "#d3d6da"; font.family: Theme.mono }
     }
-    RoundBtn { glyph: "|‹" }
+    RoundBtn { glyph: "|‹"; function tapAction(x, y) { Player.prev() } }
     Rectangle {
       width: 96; height: 96; radius: 48
+      function tapAction(x, y) { Player.toggle() }
       gradient: Gradient {
         GradientStop { position: 0.0; color: "#eef0f2" }
         GradientStop { position: 0.55; color: "#aeb2b8" }
@@ -221,7 +222,7 @@ Item {
         onPaint: { var c = getContext("2d"); c.reset(); c.fillStyle = "#121214"; c.beginPath(); c.moveTo(2, 1); c.lineTo(28, 16); c.lineTo(2, 31); c.closePath(); c.fill() }
       }
     }
-    RoundBtn { glyph: "›|" }
+    RoundBtn { glyph: "›|"; function tapAction(x, y) { Player.next() } }
   }
 
   Hints {
@@ -263,6 +264,7 @@ Item {
         required property var modelData
         required property int index
         width: lv.width; height: 52
+        function tapAction(x, y) { lv.currentIndex = index; music.handle("a") }
         Text {
           x: 12; width: parent.width - 120; anchors.verticalCenter: parent.verticalCenter
           text: modelData.title; elide: Text.ElideRight

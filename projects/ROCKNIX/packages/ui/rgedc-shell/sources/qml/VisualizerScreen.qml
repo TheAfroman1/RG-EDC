@@ -10,7 +10,6 @@ Item {
   id: viz
   width: 720; height: 720
   readonly property int n: Spectrum.bands
-  property int rot: System.settingsRevision >= 0 ? Number(System.setting("visualizerRotation", 0)) : 0
 
   Rectangle {
     anchors.fill: parent
@@ -23,7 +22,6 @@ Item {
   Item {
     id: stage
     anchors.fill: parent
-    rotation: viz.rot
 
     Repeater {
       model: viz.n
@@ -82,7 +80,8 @@ Item {
   function handle(b) {
     // Buttons are covered while flipped; from the menu (testing) any button returns.
     if (System.lidClosed) return true
-    if (b === "x") { System.setSetting("visualizerRotation", (rot + 90) % 360); return true }
+    // X (testing from the menu): try the next flipped-screen rotation.
+    if (b === "x") { System.setSetting("flipRotation", (win.flipRotation + 90) % 360); return true }
     Nav.back()
     return true
   }

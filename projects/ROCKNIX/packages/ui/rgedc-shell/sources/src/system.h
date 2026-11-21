@@ -62,6 +62,13 @@ public:
   Q_INVOKABLE void reboot();
   // While set, closing the lid keeps the device awake (music visualizer).
   Q_INVOKABLE void setKeepAwakeOnLid(bool on);
+  // Lowers the backlight without touching the saved brightness, or restores it.
+  Q_INVOKABLE void setDimmed(bool on);
+  // Flipped shut and idle: hand over to the normal lid sleep (screen off,
+  // input blocked); flipping open wakes it as usual.
+  Q_INVOKABLE void sleepNow();
+  // Desktop testing: pretend the lid moved.
+  Q_INVOKABLE void simulateLid(bool closed);
   Q_INVOKABLE void refresh();
   Q_INVOKABLE QString env(const QString &name) const { return qEnvironmentVariable(qPrintable(name)); }
 
@@ -98,6 +105,9 @@ private:
   int m_volume = 50;
   int m_brightness = 50;
   bool m_lidClosed = false;
+  bool m_dimmed = false;
+  QString m_backlight;      // sysfs brightness file
+  QString m_backlightSaved; // raw value before dimming
   bool m_onDevice = false;
   QString m_version;
   int m_settingsRev = 0;

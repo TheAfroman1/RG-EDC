@@ -68,6 +68,7 @@ Item {
       required property var modelData
       required property int index
       readonly property bool on: index === ns.sel
+      function tapAction(x, y) { ns.sel = index; ns.handle("a") }
       width: lv.width; height: title.y + title.height + (body.visible ? body.height + 4 : 0) + 20
       radius: 16
       color: on ? "#17181b" : "#0f1012"
